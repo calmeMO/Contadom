@@ -11,6 +11,4 @@
   to = "/index.html"
   status = 200
 
-[build.environment]
-  VITE_SUPABASE_URL = "https://dfgplljylupvbvtyaxsr.supabase.co"
-  # No incluyas VITE_SUPABASE_ANON_KEY aquí, usa variables de entorno de Netlify 
+# Configura las variables de entorno directamente en el panel de Netlify 
