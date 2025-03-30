@@ -71,10 +71,25 @@ const supabaseOptions = {
     fetch: async (...args: Parameters<typeof fetch>) => {
       const fetchWithRetry = () => fetch(...args);
       try {
-        return await retryOperation(fetchWithRetry);
+        const url = args[0] instanceof Request ? args[0].url : String(args[0]);
+        console.log(`Iniciando petición a: ${url.split('?')[0]}`);
+        
+        // Aumentar el número de reintentos para operaciones críticas
+        const isAccountsQuery = url.includes('/accounts');
+        const maxRetries = isAccountsQuery ? 5 : 3;
+        const response = await retryOperation(fetchWithRetry, maxRetries);
+        
+        // Log de respuesta exitosa
+        if (response.ok) {
+          console.log(`Petición exitosa a: ${url.split('?')[0]} - Status: ${response.status}`);
+        } else {
+          console.warn(`Respuesta con error: ${url.split('?')[0]} - Status: ${response.status}`);
+        }
+        
+        return response;
       } catch (error) {
         console.error('Error en la conexión con Supabase:', error);
-        toast.error('Error de conexión. Intentando reconectar...');
+        toast.error('Error de conexión con la base de datos. Intentando reconectar...');
         throw error;
       }
     }

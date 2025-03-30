@@ -1,0 +1,62 @@
+{% extends 'base.html' %}
+{% block title %}Diario{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Diario</h1>
+    <div class="container">
+        <table class="table table-bordered table-hover table-striped mt-3">
+            <thead class="thead-dark">
+                <tr>
+                    <th>Fecha</th>
+                    <th>Cuentas y Explicación</th>
+                    <th>Ref. de Transacción</th>
+                    <th>Debe</th>
+                    <th>Haber</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in transacciones %}
+                <!-- Fila para la fecha de la transacción -->
+                <tr class="table-primary">
+                    <td colspan="5"><strong>{{ t.fecha_transaccion|date:"F d, Y" }}</strong></td>
+                </tr>
+                
+                <!-- Fila para el cargo (Debe) -->
+                <tr>
+                    <td></td>
+                    <td>{{ t.id_cuenta_cargo.nombre_cuenta }}</td>
+                    <td>{{ t.id_cuenta_cargo_id }}</td>
+                    <td>{{ t.monto_transaccion|floatformat:2 }}</td>
+                    <td></td>
+                </tr>
+
+                <!-- Fila para el abono (Haber) -->
+                <tr>
+                    <td></td>
+                    <td>{{ t.id_cuenta_abono.nombre_cuenta }}</td>
+                    <td>{{ t.id_cuenta_abono_id }}</td>
+                    <td></td>
+                    <td>{{ t.monto_transaccion|floatformat:2 }}</td>
+                </tr>
+
+                <!-- Fila para la descripción -->
+                <tr>
+                    <td></td>
+                    <td colspan="4"><em>{{ t.descripcion_transaccion }}</em></td>
+                </tr>
+
+                <!-- Espacio entre transacciones para mejor legibilidad -->
+                <tr class="table-secondary">
+                    <td colspan="5">&nbsp;</td>
+                </tr>
+                {% empty %}
+                <tr>
+                    <td colspan="5" class="text-center">No hay transacciones disponibles.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

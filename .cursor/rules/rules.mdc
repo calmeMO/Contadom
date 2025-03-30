@@ -1,0 +1,9 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+
+# Your rule content
+
+-Always consult the database to know the context and possible changes to avoid mistakes, so you can know if it is necessary to make migrations

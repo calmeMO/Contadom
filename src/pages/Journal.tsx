@@ -1,558 +1,657 @@
-import { useState, useEffect, useCallback } from 'react';
-import { Plus, Pencil, Eye, Filter, Calendar } from 'lucide-react';
-import { toast } from 'react-toastify';
+import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { supabase } from '../lib/supabase';
+import { toast } from 'react-toastify';
 import { format } from 'date-fns';
-import { es } from 'date-fns/locale';
-import { JournalEntryForm } from '../components/JournalEntryForm';
+import { v4 as uuidv4 } from 'uuid';
+import { 
+  Plus, 
+  FileEdit, 
+  Trash2, 
+  Copy, 
+  Eye, 
+  Check,
+  Search,
+  Filter,
+  ArrowUpDown,
+  XCircle
+} from 'lucide-react';
+import JournalEntryForm from '../components/JournalEntryForm';
+import Modal from '../components/ui/Modal';
+import { 
+  fetchJournalEntries, 
+  getJournalEntry, 
+  approveJournalEntry, 
+  deleteJournalEntry,
+  cancelJournalEntry
+} from '../services/journalService';
+import { 
+  fetchFiscalYears, 
+  getAvailablePeriodsForEntry,
+  MonthlyPeriod
+} from '../services/accountingPeriodService';
+import Decimal from 'decimal.js';
 
-// Tipos de datos
-type JournalEntry = {
-  id: string;
-  date: string;
-  entry_number: string;
-  description: string;
-  is_balanced?: boolean;
-  is_approved?: boolean;
-  created_at: string;
-  created_by: string;
-  accounting_period_id: string;
-  period?: {
-    name: string;
-  };
-  total_debit?: number;
-  total_credit?: number;
-  user?: {
-    email: string;
-  };
-};
-
-type AccountingPeriod = {
-  id: string;
-  name: string;
-  start_date: string;
-  end_date: string;
-  is_closed: boolean;
-};
-
-export function Journal() {
-  // Estados
-  const [entries, setEntries] = useState<JournalEntry[]>([]);
+export default function Journal() {
+  const navigate = useNavigate();
+  const [user, setUser] = useState<any>(null);
+  const [entries, setEntries] = useState<any[]>([]);
+  const [accounts, setAccounts] = useState<any[]>([]);
+  const [fiscalYears, setFiscalYears] = useState<any[]>([]);
+  const [monthlyPeriods, setMonthlyPeriods] = useState<MonthlyPeriod[]>([]);
+  const [currentEntry, setCurrentEntry] = useState<any>(null);
+  const [currentEntryItems, setCurrentEntryItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [showForm, setShowForm] = useState(false);
-  const [showDetail, setShowDetail] = useState(false);
-  const [selectedEntry, setSelectedEntry] = useState<JournalEntry | null>(null);
-  const [periods, setPeriods] = useState<AccountingPeriod[]>([]);
-  const [filters, setFilters] = useState({
-    accounting_period_id: '',
-    start_date: '',
-    end_date: '',
-    search: '',
-  });
+  const [modalVisible, setModalVisible] = useState(false);
+  const [modalMode, setModalMode] = useState<'create' | 'edit' | 'view'>('create');
+  const [currentFiscalYearId, setCurrentFiscalYearId] = useState<string>('');
+  const [currentMonthlyPeriodId, setCurrentMonthlyPeriodId] = useState<string>('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [searchTerm, setSearchTerm] = useState('');
+  const [sortField, setSortField] = useState('date');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const [cancelModalVisible, setCancelModalVisible] = useState(false);
+  const [cancelReason, setCancelReason] = useState('');
+  const [entryToCancel, setEntryToCancel] = useState<string | null>(null);
 
-  // Definir fetchEntries con useCallback antes de usarlo en useEffect
-  const fetchEntries = useCallback(async () => {
-    setLoading(true);
+  // Obtener el usuario actual
+  useEffect(() => {
+    const getUserData = async () => {
+      const { data } = await supabase.auth.getUser();
+      setUser(data.user);
+    };
+    getUserData();
+  }, []);
+  
+  // Cargar asientos contables
+  const fetchEntries = async () => {
     try {
-      // Consulta simple sin relaciones complejas para evitar errores
-      let query = supabase
-        .from('journal_entries')
-        .select('*')
-        .order('date', { ascending: false })
-        .order('created_at', { ascending: false });
-
-      // Aplicar filtros si existen
-      if (filters.accounting_period_id) {
-        query = query.eq('accounting_period_id', filters.accounting_period_id);
-      }
-      
-      if (filters.start_date) {
-        query = query.gte('date', filters.start_date);
-      }
-      
-      if (filters.end_date) {
-        query = query.lte('date', filters.end_date);
-      }
-      
-      if (filters.search) {
-        query = query.or(`description.ilike.%${filters.search}%,entry_number.ilike.%${filters.search}%`);
-      }
-
-      const { data, error } = await query;
+    setLoading(true);
+      const { data, error } = await fetchJournalEntries({
+        monthlyPeriodId: currentMonthlyPeriodId || undefined,
+        fiscalYearId: currentFiscalYearId || undefined,
+        status: statusFilter !== 'all' ? statusFilter : undefined,
+        searchTerm: searchTerm || undefined,
+        sortField,
+        sortOrder
+      });
 
       if (error) throw error;
-
-      // Para cada entrada, obtenemos la información adicional que necesitamos
-      const entriesWithDetails = await Promise.all((data || []).map(async (entry) => {
-        // Obtener nombre del periodo si existe accounting_period_id
-        let periodData = null;
-        if (entry.accounting_period_id) {
-          const { data: period } = await supabase
-            .from('accounting_periods')
-            .select('name')
-            .eq('id', entry.accounting_period_id)
-            .single();
-          
-          periodData = period;
-        }
-        
-        // Obtener usuario creador si existe created_by
-        let userData = null;
-        if (entry.created_by) {
-          const { data: user } = await supabase
-            .from('user_profiles')
-            .select('email')
-            .eq('id', entry.created_by)
-            .single();
-          
-          userData = user;
-        }
-        
-        return {
-          ...entry,
-          period: periodData || { name: 'Desconocido' },
-          user: userData || { email: 'Desconocido' }
-        };
-      }));
-
-      setEntries(entriesWithDetails);
-    } catch (error) {
-      console.error('Error fetching journal entries:', error);
-      toast.error('Error al cargar los asientos contables');
+      setEntries(data || []);
+    } catch (error: any) {
+      console.error('Error al cargar asientos:', error);
+      toast.error(`Error: ${error.message || 'No se pudieron cargar los asientos'}`);
     } finally {
       setLoading(false);
     }
-  }, [filters.accounting_period_id, filters.start_date, filters.end_date, filters.search]);
+  };
 
-  // Efectos
+  // Cargar datos iniciales
   useEffect(() => {
-    fetchPeriods();
-    fetchEntries();
-  }, [fetchEntries]);
-
-  async function fetchPeriods() {
+    const loadInitialData = async () => {
     try {
-      const { data, error } = await supabase
-        .from('accounting_periods')
-        .select('*')
-        .order('start_date', { ascending: false });
+      setLoading(true);
+      
+        // Cargar cuentas contables
+        const { data: accountsData, error: accountsError } = await supabase
+          .from('accounts')
+          .select('*')
+          .order('code');
+        
+        if (accountsError) throw accountsError;
+        setAccounts(accountsData || []);
+        
+        // Cargar períodos fiscales
+        const { data: fiscalYearsData, error: fiscalYearsError } = await fetchFiscalYears();
+        
+        if (fiscalYearsError) throw fiscalYearsError;
+        setFiscalYears(fiscalYearsData || []);
+        
+        // Cargar períodos mensuales disponibles
+        const { data: periodsData, error: periodsError } = await getAvailablePeriodsForEntry();
+        
+        if (periodsError) throw periodsError;
+        setMonthlyPeriods(periodsData || []);
+        
+        // Find current fiscal year (not closed and active)
+        const currentFiscalYear = fiscalYearsData?.find(year => !year.is_closed && year.is_active);
 
+        // Get current monthly period (associated with current fiscal year, not closed and active)
+        const currentMonthlyPeriod = periodsData
+          ?.filter(p => p.fiscal_year_id === currentFiscalYear?.id && !p.is_closed && p.is_active)
+          .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime())[0];
+        
+        if (currentFiscalYear) {
+          setCurrentFiscalYearId(currentFiscalYear.id);
+          
+          if (currentMonthlyPeriod) {
+            setCurrentMonthlyPeriodId(currentMonthlyPeriod.id || '');
+          }
+        }
+      } catch (error: any) {
+        console.error('Error al cargar datos iniciales:', error);
+        toast.error(`Error: ${error.message || 'No se pudieron cargar los datos iniciales'}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+    loadInitialData();
+  }, []);
+
+  // Actualizar cuando cambian los filtros
+  useEffect(() => {
+    fetchEntries();
+  }, [currentFiscalYearId, currentMonthlyPeriodId, statusFilter, searchTerm, sortField, sortOrder]);
+
+  // Crear nuevo asiento
+  const handleCreate = () => {
+    setCurrentEntry(null);
+    setCurrentEntryItems([]);
+    setModalMode('create');
+    setModalVisible(true);
+  };
+
+  // Editar asiento
+  const handleEdit = async (id: string) => {
+    try {
+      setLoading(true);
+      const { entry, items, error } = await getJournalEntry(id);
+      
       if (error) throw error;
-      setPeriods(data || []);
-    } catch (error) {
-      console.error('Error fetching periods:', error);
-      toast.error('Error al cargar los periodos contables');
+      
+      if (entry && items) {
+        setCurrentEntry(entry);
+        setCurrentEntryItems(items);
+        setModalMode('edit');
+        setModalVisible(true);
+      }
+    } catch (error: any) {
+      console.error('Error al cargar asiento:', error);
+      toast.error(`Error: ${error.message || 'No se pudo cargar el asiento'}`);
+    } finally {
+      setLoading(false);
     }
-  }
+  };
 
-  async function fetchEntryDetails(entryId: string) {
+  // Ver detalles de asiento
+  const handleView = async (id: string) => {
     try {
-      const { data: entry, error: entryError } = await supabase
-        .from('journal_entries')
-        .select('*')
-        .eq('id', entryId)
-        .single();
-
-      if (entryError) throw entryError;
+      setLoading(true);
+      const { entry, items, error } = await getJournalEntry(id);
       
-      // Obtener nombre del periodo si existe accounting_period_id
-      let periodData = null;
-      if (entry.accounting_period_id) {
-        const { data: period } = await supabase
-          .from('accounting_periods')
-          .select('name')
-          .eq('id', entry.accounting_period_id)
-          .single();
-        
-        periodData = period;
+      if (error) throw error;
+      
+      if (entry && items) {
+        setCurrentEntry(entry);
+        setCurrentEntryItems(items);
+        setModalMode('view');
+        setModalVisible(true);
       }
-      
-      // Obtener usuario creador si existe created_by
-      let userData = null;
-      if (entry.created_by) {
-        const { data: user } = await supabase
-          .from('user_profiles')
-          .select('email')
-          .eq('id', entry.created_by)
-          .single();
-        
-        userData = user;
-      }
-      
-      setSelectedEntry({
-        ...entry,
-        period: periodData,
-        user: userData
-      });
-      setShowDetail(true);
-    } catch (error) {
-      console.error('Error fetching entry details:', error);
-      toast.error('Error al cargar los detalles del asiento');
+    } catch (error: any) {
+      console.error('Error al cargar asiento:', error);
+      toast.error(`Error: ${error.message || 'No se pudo cargar el asiento'}`);
+    } finally {
+      setLoading(false);
     }
-  }
+  };
 
-  function handleNewEntry() {
-    setSelectedEntry(null);
-    setShowForm(true);
-  }
+  // Aprobar asiento
+  const handleApprove = async (id: string) => {
+    try {
+      const confirmed = window.confirm('¿Está seguro de aprobar este asiento contable?');
+      if (!confirmed) return;
+      
+      setLoading(true);
+      const { error } = await approveJournalEntry(id, user?.id);
+      
+      if (error) throw error;
+      
+      toast.success('Asiento contable aprobado correctamente');
+      fetchEntries();
+    } catch (error: any) {
+      console.error('Error al aprobar asiento:', error);
+      toast.error(`Error: ${error.message || 'No se pudo aprobar el asiento'}`);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  function handleEditEntry(entry: JournalEntry) {
-    setSelectedEntry(entry);
-    setShowForm(true);
-  }
+  // Eliminar asiento
+  const handleDelete = async (id: string) => {
+    try {
+      const confirmed = window.confirm('¿Está seguro de eliminar este asiento contable? Esta acción no se puede deshacer.');
+      if (!confirmed) return;
+      
+      setLoading(true);
+      const { error } = await deleteJournalEntry(id);
+      
+      if (error) throw error;
+      
+      toast.success('Asiento contable eliminado correctamente');
+      fetchEntries();
+    } catch (error: any) {
+      console.error('Error al eliminar asiento:', error);
+      toast.error(`Error: ${error.message || 'No se pudo eliminar el asiento'}`);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  function handleViewEntry(entryId: string) {
-    fetchEntryDetails(entryId);
-  }
+  // Abrir modal para anular asiento
+  const handleCancel = (id: string) => {
+    setEntryToCancel(id);
+    setCancelReason('');
+    setCancelModalVisible(true);
+  };
 
-  function handleFormSuccess() {
-    setShowForm(false);
-    setSelectedEntry(null);
+  // Confirmar anulación de asiento
+  const handleCancelConfirm = async () => {
+    if (!entryToCancel) return;
+    
+    if (!cancelReason.trim()) {
+      toast.error('Debe proporcionar un motivo para anular el asiento');
+      return;
+    }
+    
+    try {
+      setLoading(true);
+      const { error } = await cancelJournalEntry(entryToCancel, user?.id, cancelReason);
+      
+      if (error) throw error;
+      
+      toast.success('Asiento contable anulado correctamente');
+      fetchEntries();
+      setCancelModalVisible(false);
+    } catch (error: any) {
+      console.error('Error al anular asiento:', error);
+      toast.error(`Error: ${error.message || 'No se pudo anular el asiento'}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Duplicar asiento
+  const handleDuplicate = async (id: string) => {
+    try {
+      setLoading(true);
+      const { entry, items, error } = await getJournalEntry(id);
+      
+      if (error) throw error;
+      
+      if (entry && items) {
+        // Crear una copia del asiento con la fecha actual
+        const newEntry = {
+          ...entry,
+          id: undefined,
+          entry_number: undefined,
+          date: format(new Date(), 'yyyy-MM-dd'),
+          description: `Copia de: ${entry.description}`,
+          status: 'pendiente',
+          is_approved: false,
+          is_posted: false,
+          created_at: undefined,
+          updated_at: undefined,
+          // Utilizar el período mensual actualmente seleccionado
+          monthly_period_id: currentMonthlyPeriodId || entry.monthly_period_id
+        };
+        
+        // Crear copia de las líneas
+        const newItems = items.map(item => ({
+          ...item,
+          id: undefined,
+          journal_entry_id: undefined,
+          temp_id: uuidv4()
+        }));
+        
+        setCurrentEntry(newEntry);
+        setCurrentEntryItems(newItems);
+        setModalMode('create');
+        setModalVisible(true);
+      }
+    } catch (error: any) {
+      console.error('Error al duplicar asiento:', error);
+      toast.error(`Error: ${error.message || 'No se pudo duplicar el asiento'}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Manejar el cierre del modal
+  const handleModalCancel = () => {
+    setModalVisible(false);
+  };
+
+  // Manejar la finalización del formulario
+  const handleFormFinish = (id: string) => {
+    setModalVisible(false);
     fetchEntries();
-  }
+  };
 
-  function handleApplyFilters() {
-    fetchEntries();
-  }
+  // Manejar cambio de período fiscal
+  const handleFiscalYearChange = (id: string) => {
+    setCurrentFiscalYearId(id);
+    setCurrentMonthlyPeriodId(''); // Limpiar el período mensual al cambiar el año fiscal
+  };
 
-  function handleResetFilters() {
-    setFilters({
-      accounting_period_id: '',
-      start_date: '',
-      end_date: '',
-      search: '',
-    });
-    fetchEntries();
-  }
+  // Manejar cambio de período mensual
+  const handleMonthlyPeriodChange = (id: string) => {
+    setCurrentMonthlyPeriodId(id);
+  };
 
-  function getStatusLabel(entry: JournalEntry) {
-    if (entry.is_balanced === false) {
-      return (
-        <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">
-          Desbalanceado
-        </span>
-      );
-    } else if (entry.is_approved) {
-      return (
-        <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
-          Aprobado
-        </span>
-      );
+  // Calcular saldo
+  const calculateBalance = (debit: number, credit: number): number => {
+    const debitDecimal = new Decimal(debit);
+    const creditDecimal = new Decimal(credit);
+    return debitDecimal.minus(creditDecimal).toNumber();
+  };
+
+  // Ordenar por campo
+  const handleSort = (field: string) => {
+    if (sortField === field) {
+      setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc');
     } else {
-      return (
-        <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">
-          Pendiente
-        </span>
-      );
+      setSortField(field);
+      setSortOrder('asc');
     }
-  }
+  };
 
-  // Renderizado
   return (
-    <div className="space-y-6">
-      {/* Encabezado */}
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold text-gray-900">Libro Diario</h1>
+    <div className="container mx-auto p-4">
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">Diario Contable</h1>
         <button
-          onClick={handleNewEntry}
-          className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          onClick={handleCreate}
+          className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-md flex items-center"
         >
-          <Plus className="h-5 w-5 mr-2" />
+          <Plus size={18} className="mr-1" />
           Nuevo Asiento
         </button>
       </div>
 
-      {/* Filtros */}
-      <div className="bg-white shadow sm:rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4 flex items-center">
-            <Filter className="h-5 w-5 mr-2" />
-            Filtros
-          </h3>
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <div>
-              <label htmlFor="accounting_period_id" className="block text-sm font-medium text-gray-700">
-                Periodo Contable
-              </label>
+      <div className="bg-white rounded-lg shadow mb-6">
+        <div className="p-4 border-b">
+          <h2 className="text-lg font-medium">Filtros</h2>
+              </div>
+        <div className="p-4 grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Período Fiscal</label>
               <select
-                id="accounting_period_id"
-                name="accounting_period_id"
-                value={filters.accounting_period_id}
-                onChange={(e) => setFilters({ ...filters, accounting_period_id: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-              >
-                <option value="">Todos los periodos</option>
-                {periods.map((period) => (
-                  <option key={period.id} value={period.id}>
-                    {period.name} {period.is_closed ? "(Cerrado)" : ""}
+              value={currentFiscalYearId}
+              onChange={(e) => handleFiscalYearChange(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-md"
+            >
+              <option value="">Todos los períodos fiscales</option>
+              {fiscalYears.map(year => (
+                  <option key={year.id} value={year.id}>
+                    {year.name}
                   </option>
                 ))}
               </select>
-            </div>
+          </div>
+              
             <div>
-              <label htmlFor="start_date" className="block text-sm font-medium text-gray-700">
-                Fecha Inicio
-              </label>
-              <input
-                type="date"
-                id="start_date"
-                name="start_date"
-                value={filters.start_date}
-                onChange={(e) => setFilters({ ...filters, start_date: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-              />
-            </div>
-            <div>
-              <label htmlFor="end_date" className="block text-sm font-medium text-gray-700">
-                Fecha Fin
-              </label>
-              <input
-                type="date"
-                id="end_date"
-                name="end_date"
-                value={filters.end_date}
-                onChange={(e) => setFilters({ ...filters, end_date: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
-              />
-            </div>
-            <div>
-              <label htmlFor="search" className="block text-sm font-medium text-gray-700">
-                Buscar
-              </label>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Período Mensual</label>
+              <select
+              value={currentMonthlyPeriodId}
+              onChange={(e) => handleMonthlyPeriodChange(e.target.value)}
+              className="w-full p-2 border border-gray-300 rounded-md"
+            >
+              <option value="">Todos los períodos mensuales</option>
+              {monthlyPeriods.map(period => (
+                  <option key={period.id} value={period.id}>
+                    {period.name}
+                  </option>
+                ))}
+              </select>
+          </div>
+          
+          <div className="md:col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Estado</label>
+                <div className="relative">
+              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <Search size={16} className="text-gray-400" />
+                </div>
               <input
                 type="text"
-                id="search"
-                name="search"
-                placeholder="Número o descripción"
-                value={filters.search}
-                onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Buscar por número, descripción o referencia"
+                className="w-full p-2 pl-10 border border-gray-300 rounded-md"
               />
+                </div>
+              </div>
             </div>
-          </div>
-          <div className="mt-4 flex justify-end space-x-3">
-            <button
-              onClick={handleResetFilters}
-              className="inline-flex items-center px-3 py-2 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-            >
-              Limpiar
-            </button>
-            <button
-              onClick={handleApplyFilters}
-              className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-            >
-              Aplicar Filtros
-            </button>
-          </div>
         </div>
-      </div>
-
-      {/* Tabla de Asientos */}
-      <div className="bg-white shadow rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          {loading ? (
-            <div className="flex justify-center">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-            </div>
-          ) : entries.length === 0 ? (
-            <div className="text-center py-12">
-              <Calendar className="mx-auto h-12 w-12 text-gray-400" />
-              <h3 className="mt-2 text-sm font-medium text-gray-900">
-                No hay asientos contables
-              </h3>
-              <p className="mt-1 text-sm text-gray-500">
-                Comience creando un nuevo asiento contable.
-              </p>
-            </div>
-          ) : (
+        
+      <div className="bg-white rounded-lg shadow">
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
-                    <th
-                      scope="col"
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >
-                      Fecha
-                    </th>
-                    <th
-                      scope="col"
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >
-                      Número
-                    </th>
-                    <th
-                      scope="col"
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >
-                      Descripción
-                    </th>
-                    <th
-                      scope="col"
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >
-                      Periodo
-                    </th>
-                    <th
-                      scope="col"
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >
-                      Estado
-                    </th>
-                    <th
-                      scope="col"
-                      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider"
-                    >
-                      Acciones
-                    </th>
+                <th 
+                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
+                  onClick={() => handleSort('entry_number')}
+                >
+                  <div className="flex items-center">
+                    Número
+                    {sortField === 'entry_number' && (
+                      <ArrowUpDown size={14} className="ml-1" />
+                    )}
+                  </div>
+                </th>
+                <th 
+                  className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer"
+                  onClick={() => handleSort('date')}
+                >
+                  <div className="flex items-center">
+                    Fecha
+                    {sortField === 'date' && (
+                      <ArrowUpDown size={14} className="ml-1" />
+                    )}
+                  </div>
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Descripción
+                </th>
+                <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Período
+                </th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Débito
+                </th>
+                <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Crédito
+                </th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Estado
+                </th>
+                <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                  Acciones
+                </th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {entries.map((entry) => (
-                    <tr key={entry.id}>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {format(new Date(entry.date), 'dd/MM/yyyy')}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                {loading && entries.length === 0 ? (
+                  <tr>
+                  <td colSpan={8} className="px-4 py-4 text-center text-gray-500">
+                    <div className="flex justify-center">
+                      <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
+                    </div>
+                    <p className="mt-2">Cargando asientos...</p>
+                    </td>
+                  </tr>
+                ) : entries.length === 0 ? (
+                  <tr>
+                  <td colSpan={8} className="px-4 py-4 text-center text-gray-500">
+                    No hay asientos contables que mostrar
+                    </td>
+                  </tr>
+                ) : (
+                entries.map(entry => (
+                    <tr key={entry.id} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm">
                         {entry.entry_number}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    <td className="px-4 py-3 whitespace-nowrap text-sm">
+                      {entry.date}
+                    </td>
+                    <td className="px-4 py-3 text-sm">
+                      <div className="truncate max-w-xs">
                         {entry.description}
+                      </div>
+                      {entry.reference_number && (
+                        <div className="text-xs text-gray-500">
+                          Ref: {entry.reference_number}
+                        </div>
+                      )}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        {entry.period?.name || '-'}
+                    <td className="px-4 py-3 text-sm">
+                      {entry.accounting_period?.name || ''}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        {getStatusLabel(entry)}
+                    <td className="px-4 py-3 text-right whitespace-nowrap text-sm font-medium">
+                      {Number(entry.total_debit).toFixed(2)}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                        <button
-                          onClick={() => handleViewEntry(entry.id)}
-                          className="text-blue-600 hover:text-blue-900 mr-3"
-                        >
-                          <Eye className="h-4 w-4" />
-                        </button>
+                    <td className="px-4 py-3 text-right whitespace-nowrap text-sm font-medium">
+                      {Number(entry.total_credit).toFixed(2)}
+                      </td>
+                    <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
+                      <span className={`px-2 py-1 rounded-full text-xs font-medium 
+                        ${entry.status === 'aprobado' ? 'bg-green-100 text-green-800' : 
+                          entry.status === 'anulado' ? 'bg-red-100 text-red-800' : 
+                          'bg-yellow-100 text-yellow-800'}`}
+                      >
+                        {entry.status}
+                      </span>
+                      </td>
+                    <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
+                        <div className="flex justify-center space-x-1">
                         {!entry.is_approved && (
+                          <>
+                        <button
+                              onClick={() => handleEdit(entry.id)}
+                              className="text-blue-600 hover:text-blue-800 mr-1"
+                              title="Editar"
+                            >
+                              <FileEdit size={18} />
+                        </button>
+                            <button
+                              onClick={() => handleDelete(entry.id)}
+                              className="text-red-600 hover:text-red-800 mr-1"
+                              title="Eliminar"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </>
+                          )}
+                        {entry.status !== 'anulado' && (
                           <button
-                            onClick={() => handleEditEntry(entry)}
-                            className="text-blue-600 hover:text-blue-900"
+                            onClick={() => handleCancel(entry.id)}
+                            className="text-orange-600 hover:text-orange-800 mr-1"
+                            title="Anular asiento"
                           >
-                            <Pencil className="h-4 w-4" />
+                            <XCircle size={18} />
                           </button>
                         )}
+                            <button
+                          onClick={() => handleView(entry.id)}
+                          className="text-gray-600 hover:text-gray-800 mr-1"
+                          title="Ver detalles"
+                        >
+                          <Eye size={18} />
+                            </button>
+                        <button
+                          onClick={() => handleDuplicate(entry.id)}
+                          className="text-green-600 hover:text-green-800 mr-1"
+                          title="Duplicar"
+                        >
+                          <Copy size={18} />
+                        </button>
+                          {!entry.is_approved && (
+                            <button
+                            onClick={() => handleApprove(entry.id)}
+                            className="text-blue-600 hover:text-blue-800"
+                            title="Aprobar"
+                          >
+                            <Check size={18} />
+                          </button>
+                        )}
+                        </div>
                       </td>
                     </tr>
-                  ))}
+                  ))
+                )}
                 </tbody>
               </table>
             </div>
-          )}
         </div>
-      </div>
-
-      {/* Modal de detalle del asiento */}
-      {showDetail && selectedEntry && (
-        <div className="fixed inset-0 overflow-y-auto z-50" aria-labelledby="modal-title" role="dialog" aria-modal="true">
-          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-            <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
-            <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-3xl sm:w-full">
-              <div className="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-                <div className="sm:flex sm:items-start">
-                  <div className="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left w-full">
-                    <h3 className="text-lg leading-6 font-medium text-gray-900" id="modal-title">
-                      Detalle del Asiento {selectedEntry.entry_number}
-                    </h3>
-                    <div className="mt-4 space-y-4">
-                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">Fecha</p>
-                          <p className="text-sm text-gray-900">{format(new Date(selectedEntry.date), 'dd/MM/yyyy')}</p>
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium text-gray-500">Periodo</p>
-                          <p className="text-sm text-gray-900">{selectedEntry.period?.name || '-'}</p>
-                        </div>
-                        <div className="sm:col-span-2">
-                          <p className="text-sm font-medium text-gray-500">Descripción</p>
-                          <p className="text-sm text-gray-900">{selectedEntry.description}</p>
-                        </div>
-                      </div>
-                      
-                      <div className="mt-6">
-                        <p className="text-sm font-medium text-gray-500">Estado</p>
-                        <p className="text-sm text-gray-900 mt-1">
-                          {getStatusLabel(selectedEntry)}
-                        </p>
-                      </div>
-                      
-                      <div className="mt-6">
-                        <p className="text-sm font-medium text-gray-500">Creado por</p>
-                        <p className="text-sm text-gray-900">
-                          {selectedEntry.user?.email || '-'} el {selectedEntry.created_at ? format(new Date(selectedEntry.created_at), 'dd/MM/yyyy HH:mm', { locale: es }) : '-'}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-                <button
-                  type="button"
-                  className="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
-                  onClick={() => setShowDetail(false)}
-                >
-                  Cerrar
-                </button>
-                {!selectedEntry.is_approved && (
-                  <button
-                    type="button"
-                    className="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-blue-600 text-base font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 sm:ml-3 sm:w-auto sm:text-sm"
-                    onClick={() => {
-                      setShowDetail(false);
-                      handleEditEntry(selectedEntry);
-                    }}
-                  >
-                    Editar
-                  </button>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
+        
+      {/* Modal de formulario para crear/editar asientos */}
+      {modalVisible && (
+        <Modal 
+          title={
+            modalMode === 'create' 
+              ? 'Crear Asiento Contable' 
+              : modalMode === 'edit' 
+                ? 'Editar Asiento Contable' 
+                : 'Detalles del Asiento Contable'
+          }
+          onClose={handleModalCancel}
+          size="xl"
+        >
+          <JournalEntryForm
+            mode={modalMode}
+            entryId={currentEntry?.id}
+            entry={currentEntry}
+            entryItems={currentEntryItems}
+            accounts={accounts}
+            onFinish={handleFormFinish}
+            onCancel={handleModalCancel}
+            loading={loading}
+          />
+        </Modal>
       )}
 
-      {/* Formulario para nuevo asiento o edición */}
-      {showForm && (
-        <div className="fixed inset-0 overflow-y-auto z-50" aria-labelledby="modal-title" role="dialog" aria-modal="true">
-          <div className="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-            <div className="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
-            <span className="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
-            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-4xl sm:w-full">
-              <div className="bg-white px-4 pt-5 pb-4 sm:p-6">
-                <div className="sm:flex sm:items-start">
-                  <div className="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left w-full">
-                    <h3 className="text-lg leading-6 font-medium text-gray-900" id="modal-title">
-                      {selectedEntry ? 'Editar Asiento' : 'Nuevo Asiento'}
-                    </h3>
-                    <div className="mt-2">
-                      <p className="text-sm text-gray-500">
-                        {selectedEntry ? 'Modifique la información del asiento contable.' : 'Complete la información del nuevo asiento contable.'}
-                      </p>
-                    </div>
-                    <div className="mt-4">
-                      <JournalEntryForm
-                        entry={selectedEntry || undefined}
-                        onSuccess={handleFormSuccess}
-                        onCancel={() => setShowForm(false)}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
+      {/* Modal para anular asiento */}
+      {cancelModalVisible && (
+        <Modal 
+          title="Anular Asiento Contable" 
+          onClose={() => setCancelModalVisible(false)}
+          size="md"
+        >
+          <div className="p-4">
+            <p className="mb-4 text-gray-700">
+              Por favor, indique el motivo por el cual está anulando este asiento contable:
+            </p>
+            <textarea
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              placeholder="Motivo de anulación"
+              className="w-full p-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500 mb-4"
+              rows={4}
+            />
+            <div className="flex justify-end space-x-3">
+              <button
+                onClick={() => setCancelModalVisible(false)}
+                className="px-4 py-2 border border-gray-300 rounded-md shadow-sm bg-white text-gray-700 hover:bg-gray-50"
+              >
+                Cancelar
+              </button>
+                <button
+                onClick={handleCancelConfirm}
+                disabled={loading}
+                className="px-4 py-2 border border-transparent rounded-md shadow-sm bg-red-600 text-white hover:bg-red-700 flex items-center"
+              >
+                {loading ? (
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                ) : (
+                  <XCircle size={16} className="mr-2" />
+                )}
+                Anular Asiento
+              </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );

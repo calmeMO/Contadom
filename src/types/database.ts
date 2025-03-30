@@ -16,9 +16,10 @@ export type AccountType =
   | 'costo'
   | 'cuenta_orden';
 export type EntryType = 'debit' | 'credit';
-export type JournalEntryStatus = 'draft' | 'posted' | 'voided';
+export type JournalEntryStatus = 'pendiente' | 'aprobado' | 'voided';
 export type AccountNature = 'deudora' | 'acreedora';
-export type PeriodType = 'monthly' | 'quarterly' | 'annual' | 'custom';
+export type PeriodType = 'monthly' | 'quarterly' | 'annual';
+export type FiscalYearType = 'calendar' | 'fiscal_mar' | 'fiscal_jun' | 'fiscal_sep';
 
 export interface UserProfile {
   id: string;
@@ -41,7 +42,6 @@ export interface AccountCategory {
 
 export interface Account {
   id: string;
-  category_id: string | null;
   parent_id: string | null;
   code: string;
   name: string;
@@ -49,10 +49,10 @@ export interface Account {
   type: AccountType;
   nature: AccountNature;
   is_active: boolean;
+  is_parent: boolean;
   created_at: string;
   created_by: string;
   updated_at: string;
-  category?: Pick<AccountCategory, 'name'>;
   parent?: Pick<Account, 'code' | 'name'>;
 }
 
@@ -63,9 +63,17 @@ export interface AccountingPeriod {
   end_date: string;
   period_type: PeriodType;
   fiscal_purpose: string | null;
+  fiscal_year_type: FiscalYearType;
+  parent_id: string | null;
+  is_month: boolean;
   is_closed: boolean;
-  closed_at: string | null;
-  closed_by: string | null;
+  closed_at?: string;
+  closed_by?: string;
+  is_reopened?: boolean;
+  reopened_at?: string;
+  reopened_by?: string;
+  reclosed_at?: string;
+  reclosed_by?: string;
   created_at: string;
   created_by: string;
   updated_at: string;
