@@ -6,6 +6,18 @@
   command = "npm run dev"
   port = 3000
 
+# Redirecciones específicas para manejar rutas de GitHub Pages
+[[redirects]]
+  from = "/contadom"
+  to = "/"
+  status = 301
+
+[[redirects]]
+  from = "/contadom/*"
+  to = "/:splat"
+  status = 301
+
+# Redirección para SPA
 [[redirects]]
   from = "/*"
   to = "/index.html"
