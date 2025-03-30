@@ -3,14 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "homepage": "https://calmeMO.github.io/contadom",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "lint": "eslint .",
-    "preview": "vite preview",
-    "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist"
+    "preview": "vite preview"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",
@@ -22,7 +19,6 @@
     "decimal.js": "^10.5.0",
     "dexie": "^4.0.11",
     "framer-motion": "^11.0.8",
-    "gh-pages": "^6.3.0",
     "jspdf": "^2.5.1",
     "localforage": "^1.10.0",
     "lucide-react": "^0.344.0",

@@ -51,7 +51,7 @@ function App() {
   }
 
   return (
-    <Router basename="/contadom">
+    <Router>
       <AuthProvider>
         <ToastContainer />
         <Routes>
