@@ -298,20 +298,19 @@ export default function JournalEntryForm({
     const indent = ' '.repeat(indentLevel * 4);
 
     accounts.forEach(account => {
-      // Solo mostrar cuentas que no son padre (cuentas de movimiento)
-      if (!account.isParent) {
-        options.push(
-          <option 
-            key={account.id} 
-            value={account.id} 
-            className="text-gray-900"
-          >
-            {indent}{account.fullName}
-          </option>
-        );
-      }
+      // Mostrar todas las cuentas, pero deshabilitar las cuentas padre
+      options.push(
+        <option 
+          key={account.id} 
+          value={account.id} 
+          className={account.isParent ? "text-gray-400 font-semibold" : "text-gray-900"}
+          disabled={account.isParent}
+        >
+          {indent}{account.fullName}{account.isParent ? ' (Cuenta Padre)' : ''}
+        </option>
+      );
       
-      // Seguir procesando los hijos aunque el padre no se muestre
+      // Procesar los hijos
       if (account.children && account.children.length > 0) {
         options = options.concat(renderAccountOptions(account.children, indentLevel + 1));
       }
