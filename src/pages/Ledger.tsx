@@ -41,6 +41,7 @@ export function Ledger() {
   const [expanded, setExpanded] = useState(false);
   const [showZeroBalances, setShowZeroBalances] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [dataLoaded, setDataLoaded] = useState(false);
 
   useEffect(() => {
     loadAccounts();
@@ -80,7 +81,10 @@ export function Ledger() {
   // Cargar datos del libro mayor
   const loadLedgerData = useCallback(async () => {
     if (!startDate || !endDate) {
-      toast.warn('Debe seleccionar un rango de fechas');
+      // Solo mostrar el mensaje si no estamos en la carga inicial
+      if (dataLoaded) {
+        toast.warn('Debe seleccionar un rango de fechas');
+      }
       return;
     }
 
@@ -116,6 +120,7 @@ export function Ledger() {
       toast.error('Error al cargar los datos del libro mayor');
     } finally {
       setLoading(false);
+      setDataLoaded(true);
     }
   }, [
     accounts, 
@@ -124,12 +129,15 @@ export function Ledger() {
     selectedAccountId, 
     selectedTypes, 
     searchTerm,
-    showZeroBalances
+    showZeroBalances,
+    dataLoaded
   ]);
 
   useEffect(() => {
-    loadLedgerData();
-  }, [loadLedgerData]);
+    if (accounts.length > 0) {
+      loadLedgerData();
+    }
+  }, [loadLedgerData, accounts]);
 
   // Funciones auxiliares
   function getAccountTypeLabel(type: string) {

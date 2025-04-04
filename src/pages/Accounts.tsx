@@ -3,7 +3,7 @@ import { Plus, Pencil, AlertCircle, Power, FileText, ChevronRight, ChevronDown }
 import { toast } from 'react-toastify';
 import { supabase } from '../lib/supabase';
 import { AccountForm } from '../components/AccountForm';
-import type { Account as BaseAccount, AccountType } from '../types/database';
+import type { Account as BaseAccount } from '../types/database';
 
 type Account = BaseAccount & { child_count?: number; children?: Account[] };
 
@@ -407,7 +407,7 @@ export function Accounts() {
               {account.is_active && (
                 <button
                   onClick={() => handleDeactivate(account)}
-                  disabled={deactivateLoading === account.id || (account.child_count && account.child_count > 0)}
+                  disabled={deactivateLoading === account.id || Boolean(account.child_count && account.child_count > 0)}
                   className={`text-red-600 hover:text-red-900 ${
                     deactivateLoading === account.id || (account.child_count && account.child_count > 0) 
                       ? 'opacity-50 cursor-not-allowed' 
@@ -490,7 +490,7 @@ export function Accounts() {
             {account.is_active && (
               <button
                 onClick={() => handleDeactivate(account)}
-                disabled={deactivateLoading === account.id || (account.child_count && account.child_count > 0)}
+                disabled={deactivateLoading === account.id || Boolean(account.child_count && account.child_count > 0)}
                 className={`text-red-600 hover:text-red-900 ${
                   deactivateLoading === account.id || (account.child_count && account.child_count > 0) 
                     ? 'opacity-50 cursor-not-allowed' 

@@ -6,4 +6,8 @@ alwaysApply: true
 
 # Your rule content
 
--Always consult the database to know the context and possible changes to avoid mistakes, so you can know if it is necessary to make migrations
+Always consult the database to understand the current context and detect possible changes to avoid errors. This ensures you know whether migrations are necessary.
+
+Analyze the existing code before making changes, as this is an accounting cycle project where each module depends on another.
+
+Only use libraries that are essential for the project to avoid unnecessary dependencies.

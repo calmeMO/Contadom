@@ -13,6 +13,7 @@ export interface FinancialRatio {
   optimal_range?: string;
   value: number;
   status: 'good' | 'warning' | 'bad' | 'neutral';
+  higherIsBetter?: boolean;
 }
 
 export enum RatioCategory {
@@ -23,14 +24,22 @@ export enum RatioCategory {
   COVERAGE = 'coverage'
 }
 
+export type RatioCategoryMap = {
+  [key in RatioCategory]: {
+    [key: string]: FinancialRatio;
+  };
+};
+
 export interface FinancialAnalysisResult {
   ratios: FinancialRatio[];
+  ratiosByCategory: RatioCategoryMap;
   periodId: string;
   periodName: string;
   createdAt: string;
 }
 
 export interface TrendData {
+  labels: string[];
   periods: string[];
   datasets: {
     label: string;
@@ -61,14 +70,15 @@ export interface ComparisonResult {
   }>;
 }
 
-// Interfaz para datos de tendencias
-export interface TrendData {
-  labels: string[];
-  datasets: Array<{
-    metricId: string;
-    metricName: string;
-    data: number[];
-  }>;
+// Interfaces para datos de la base de datos
+interface SavedAnalysis {
+  id: string;
+  ratios: FinancialRatio[];
+  created_at: string;
+  accounting_period: {
+    id: string;
+    name: string;
+  };
 }
 
 /**
@@ -268,8 +278,18 @@ export async function calculateFinancialRatios(periodId: string): Promise<Financ
       status: roe >= 15 ? 'good' : (roe >= 10 ? 'warning' : (roe >= 0 ? 'neutral' : 'bad'))
     });
     
+    // Organizar ratios por categoría
+    const ratiosByCategory = ratios.reduce((acc, ratio) => {
+      if (!acc[ratio.category]) {
+        acc[ratio.category] = {};
+      }
+      acc[ratio.category][ratio.id] = ratio;
+      return acc;
+    }, {} as RatioCategoryMap);
+
     return {
       ratios,
+      ratiosByCategory,
       periodId: period.id,
       periodName: period.name,
       createdAt: new Date().toISOString()
@@ -309,8 +329,7 @@ export async function saveFinancialAnalysis(
         .from('financial_analysis')
         .update({
           ratios: analysisResult.ratios,
-          updated_at: new Date().toISOString(),
-          updated_by: userId
+          updated_at: new Date().toISOString()
         })
         .eq('id', existingAnalysis[0].id)
         .select('id')
@@ -365,7 +384,7 @@ export async function getFinancialAnalysis(periodId: string): Promise<FinancialA
       `)
       .eq('accounting_period_id', periodId)
       .limit(1)
-      .single();
+      .single() as { data: SavedAnalysis | null; error: any };
     
     if (savedError) {
       // Si no hay resultados, calcular un nuevo análisis
@@ -375,9 +394,23 @@ export async function getFinancialAnalysis(periodId: string): Promise<FinancialA
       throw savedError;
     }
     
+    if (!savedAnalysis) {
+      return null;
+    }
+    
+    // Organizar ratios por categoría
+    const ratiosByCategory = savedAnalysis.ratios.reduce((acc: RatioCategoryMap, ratio: FinancialRatio) => {
+      if (!acc[ratio.category]) {
+        acc[ratio.category] = {};
+      }
+      acc[ratio.category][ratio.id] = ratio;
+      return acc;
+    }, {} as RatioCategoryMap);
+    
     // Transformar datos al formato esperado
     return {
       ratios: savedAnalysis.ratios,
+      ratiosByCategory,
       periodId: savedAnalysis.accounting_period.id,
       periodName: savedAnalysis.accounting_period.name,
       createdAt: savedAnalysis.created_at
@@ -480,6 +513,7 @@ export async function getFinancialTrends(
     const datasets = Object.values(datasetsMap);
     
     return {
+      labels: periodNames,
       periods: periodNames,
       datasets
     };
@@ -517,7 +551,7 @@ export async function compareFinancialPeriods(periodId1: string, periodId2: stri
     if (period2Error) throw period2Error;
     
     // Obtener análisis financiero para el primer período
-    const analysis1 = await getFinancialAnalysis(periodId1);
+    let analysis1 = await getFinancialAnalysis(periodId1);
     if (!analysis1) {
       // Si no existe, calcularlo primero
       await calculateFinancialRatios(periodId1);
@@ -529,7 +563,7 @@ export async function compareFinancialPeriods(periodId1: string, periodId2: stri
     }
     
     // Obtener análisis financiero para el segundo período
-    const analysis2 = await getFinancialAnalysis(periodId2);
+    let analysis2 = await getFinancialAnalysis(periodId2);
     if (!analysis2) {
       // Si no existe, calcularlo primero
       await calculateFinancialRatios(periodId2);

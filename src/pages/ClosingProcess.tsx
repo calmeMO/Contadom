@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
 import { 
   Lock, 
@@ -18,13 +18,11 @@ import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { 
   ClosingData, 
-  ClosingResult, 
   generateClosingEntries, 
   reopenAccountingPeriod, 
   verifyPeriodReadyForClosing,
   getClosingEntries,
-  updateDatabaseSchema,
-  ClosingEntryType
+  updateDatabaseSchema
 } from '../services/closingService';
 import { formatCurrency } from '../utils/formatters';
 
@@ -112,12 +110,8 @@ export function ClosingProcess() {
     try {
       // Cargar detalles del período
       const { data: period, error: periodError } = await supabase
-        .from('accounting_periods')
-        .select(`
-          *,
-          closed_by_user:closed_by(email),
-          reopened_by_user:reopened_by(email)
-        `)
+        .from('accounting_periods_with_users')
+        .select('*')
         .eq('id', periodId)
         .single();
       
@@ -177,7 +171,12 @@ export function ClosingProcess() {
         notes: `Cierre automático del período ${periodData.name}`
       };
       
-      const result = await generateClosingEntries(closingData);
+      const result = await generateClosingEntries(
+        closingData.periodId,
+        closingData.userId,
+        new Date(closingData.date),
+        closingData.notes
+      );
       
       if (result.success) {
         toast.success(result.message);
@@ -189,7 +188,7 @@ export function ClosingProcess() {
         
         // Mostrar resumen del cierre
         setTimeout(() => {
-          toast.info(`Resumen del cierre: Ingresos $${formatCurrency(result.totalIncome)}, Gastos $${formatCurrency(result.totalExpense)}, Resultado Neto $${formatCurrency(result.netResult)}`);
+          toast.info(`Resumen del cierre: Ingresos $${formatCurrency(result.totalIncome || 0)}, Gastos $${formatCurrency(result.totalExpenses || 0)}, Resultado Neto $${formatCurrency(result.netResult || 0)}`);
         }, 1000);
       } else {
         toast.error(result.message);

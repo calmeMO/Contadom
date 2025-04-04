@@ -74,11 +74,6 @@ export function Layout() {
       icon: <Scale size={18} />
     },
     {
-      name: 'Ajustes',
-      path: '/adjustments',
-      icon: <Calculator size={18} />
-    },
-    {
       name: 'Cierre',
       path: '/closing-process',
       icon: <Lock size={18} />

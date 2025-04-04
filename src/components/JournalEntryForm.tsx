@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { supabase } from '../lib/supabase';
 import { v4 as uuidv4 } from 'uuid';
 import { format, parseISO, isValid } from 'date-fns';
@@ -8,58 +8,51 @@ import {
   Trash2, 
   CheckCircle, 
   XCircle, 
-  Save
+  Save, 
+  Info
 } from 'lucide-react';
 import { 
   validateDateInPeriod, 
   validateBalance, 
   createJournalEntry, 
   updateJournalEntry,
-  JournalEntryForm as JournalFormData
+  JournalEntryForm as JournalFormData,
+  JournalEntryItem,
+  AdjustmentType
 } from '../services/journalService';
 import { getAvailablePeriodsForEntry } from '../services/accountingPeriodService';
 import Decimal from 'decimal.js';
 
-// Props del componente
+// Lista de tipos de ajuste para el dropdown
+const adjustmentTypes: { value: AdjustmentType; label: string }[] = [
+  { value: 'depreciation', label: 'Depreciación' },
+  { value: 'amortization', label: 'Amortización' },
+  { value: 'accrual', label: 'Devengo' },
+  { value: 'deferred', label: 'Diferido' },
+  { value: 'inventory', label: 'Inventario' },
+  { value: 'correction', label: 'Corrección de Error' },
+  { value: 'provision', label: 'Provisión' },
+  { value: 'valuation', label: 'Valoración' },
+  { value: 'other', label: 'Otro' },
+];
+
+// Props del componente actualizadas
 interface JournalEntryFormProps {
-  mode: 'create' | 'edit' | 'view';
+  mode: 'create' | 'edit' | 'view' | 'create-adjustment' | 'edit-adjustment';
   entryId?: string;
   entry?: any;
   entryItems?: any[];
   accounts: any[];
-  onFinish: (id: string) => void;
+  onFinish: (id: string | null) => void;
   onCancel: () => void;
   loading?: boolean;
 }
 
-// Estructura del formulario
-interface JournalEntryItem {
-  id?: string;
-  journal_entry_id?: string;
-  account_id: string;
-  description?: string;
-  debit?: number;
-  credit?: number;
-  temp_id?: string;
-  is_debit?: boolean;
-  amount?: number;
-  account?: {
-    id: string;
-    code: string;
-    name: string;
-    type: string;
-    nature: string;
-  };
-}
-
-interface FormData {
-    date: string;
-    description: string;
-  monthly_period_id: string;
-  accounting_period_id?: string;
-  notes: string;
-  reference_number: string;
-  reference_date: string | undefined;
+// Estructura del formulario actualizada para incluir campos de ajuste
+interface FormData extends JournalFormData {
+  is_adjustment: boolean;
+  adjustment_type: AdjustmentType | null;
+  adjusted_entry_id: string | null;
 }
 
 // Primero, vamos a añadir la estructura necesaria para agrupar cuentas
@@ -76,37 +69,94 @@ interface AccountOption {
   children?: AccountOption[];
 }
 
+// Mover las funciones auxiliares de jerarquía aquí, fuera y antes del componente
+// si no dependen de props o estado, o dentro pero antes de su uso si sí dependen.
+// En este caso, solo dependen de flatAccounts, que se pasa como argumento.
+
+// Función para construir la jerarquía
+const buildAccountHierarchy = (flatAccounts: any[]): AccountOption[] => {
+  const accountMap = new Map<string, AccountOption>();
+  const roots: AccountOption[] = [];
+
+  flatAccounts.forEach(acc => {
+      accountMap.set(acc.id, { 
+          ...acc, 
+          children: [], 
+          level: 0, 
+          fullName: `${acc.code} - ${acc.name}`
+      });
+  });
+
+  flatAccounts.forEach(acc => {
+      const account = accountMap.get(acc.id)!;
+      if (acc.parent_id && accountMap.has(acc.parent_id)) {
+          const parent = accountMap.get(acc.parent_id)!;
+          // Asegurarse de que parent.children exista antes de hacer push
+          parent.children = parent.children || []; 
+          parent.children!.push(account);
+          account.level = parent.level + 1; 
+      } else {
+          roots.push(account); 
+      }
+  });
+  
+  return sortAccounts(roots);
+};
+
+// Función para ordenar cuentas
+const sortAccounts = (accounts: AccountOption[]): AccountOption[] => {
+    accounts.sort((a, b) => a.code.localeCompare(b.code));
+    accounts.forEach(acc => {
+        if (acc.children && acc.children.length > 0) {
+            sortAccounts(acc.children);
+        }
+    });
+    return accounts;
+};
+
 export default function JournalEntryForm({
   mode,
   entryId,
   entry,
   entryItems,
-  accounts,
+  accounts: flatAccounts,
   onFinish,
   onCancel,
   loading: externalLoading
 }: JournalEntryFormProps) {
+  // Determinar si estamos en modo ajuste
+  const isAdjustmentMode = mode === 'create-adjustment' || mode === 'edit-adjustment';
+  // Determinar si es modo vista
+  const isViewMode = mode === 'view';
+  // Determinar si es modo edición (regular o ajuste)
+  const isEditMode = mode === 'edit' || mode === 'edit-adjustment';
+
   // Estados
-  const [formData, setFormData] = useState<FormData>({
+  const [formData, setFormData] = useState<FormData>(() => ({
     date: '',
-      description: '', 
+    description: '', 
     monthly_period_id: '',
     notes: '',
     reference_number: '',
-    reference_date: undefined
-  });
+    reference_date: undefined,
+    is_adjustment: isAdjustmentMode,
+    adjustment_type: null,
+    adjusted_entry_id: null,
+  }));
   
   const [items, setItems] = useState<JournalEntryItem[]>([]);
   const [totalDebit, setTotalDebit] = useState<number>(0);
   const [totalCredit, setTotalCredit] = useState<number>(0);
+  const [balanceDifference, setBalanceDifference] = useState<number>(0);
   const [isBalanced, setIsBalanced] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
   const [user, setUser] = useState<any>(null);
   const [monthlyPeriods, setMonthlyPeriods] = useState<any[]>([]);
   const [dataLoaded, setDataLoaded] = useState(false);
-  const [hierarchicalAccounts, setHierarchicalAccounts] = useState<AccountOption[]>([]);
+  const [entries, setEntries] = useState<any[]>([]);
   
-  const isViewMode = mode === 'view';
+  // Ahora useMemo puede llamar a buildAccountHierarchy porque ya está definida
+  const hierarchicalAccounts = useMemo(() => buildAccountHierarchy(flatAccounts), [flatAccounts]);
 
   // Obtener usuario actual
   useEffect(() => {
@@ -124,42 +174,39 @@ export default function JournalEntryForm({
         const { data, error } = await getAvailablePeriodsForEntry();
         
         if (error) throw error;
-        setMonthlyPeriods(data || []);
+        const availablePeriods = data || [];
+        setMonthlyPeriods(availablePeriods);
         
-        // Si estamos creando un asiento y hay períodos disponibles
-        if (mode === 'create' && data && data.length > 0) {
-          // Obtener la fecha actual
+        // Si estamos creando (regular o ajuste) y no hay datos cargados de 'entry'
+        if ((mode === 'create' || mode === 'create-adjustment') && !entry) {
           const currentDate = new Date();
-          const currentMonth = currentDate.getMonth() + 1; // 1-12
+          const currentMonth = currentDate.getMonth() + 1;
           const currentYear = currentDate.getFullYear();
           
-          // Buscar el período que corresponde al mes actual
-          const currentPeriod = data.find(p => 
-            p.month === currentMonth && 
-            p.year === currentYear && 
-            p.is_active
+          // Priorizar período activo del mes/año actual
+          let defaultPeriod = availablePeriods.find(p => 
+            p.month === currentMonth && p.year === currentYear && !p.is_closed && p.is_active
           );
           
-          // Si no encontramos el período actual, usar el más reciente
-          if (currentPeriod) {
+          // Si no, el período activo más reciente
+          if (!defaultPeriod) {
+            defaultPeriod = [...availablePeriods]
+              .filter(p => !p.is_closed && p.is_active)
+              .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime())[0];
+          }
+          
+          // Si no hay activos, el más reciente (incluso si está cerrado, para mostrar algo)
+          if (!defaultPeriod && availablePeriods.length > 0) {
+             defaultPeriod = [...availablePeriods]
+              .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime())[0];
+          }
+
+          if (defaultPeriod) {
             setFormData(prevData => ({
               ...prevData,
-              monthly_period_id: currentPeriod.id || '',
-              accounting_period_id: currentPeriod.fiscal_year_id || ''
+              monthly_period_id: defaultPeriod.id || '',
+              accounting_period_id: defaultPeriod.fiscal_year_id || ''
             }));
-          } else {
-            // Ordenar por fecha de fin descendente para obtener el más reciente
-            const sortedPeriods = [...data].sort((a, b) => 
-              new Date(b.end_date).getTime() - new Date(a.end_date).getTime()
-            );
-            
-            if (sortedPeriods.length > 0) {
-              setFormData(prevData => ({
-                ...prevData,
-                monthly_period_id: sortedPeriods[0].id || '',
-                accounting_period_id: sortedPeriods[0].fiscal_year_id || ''
-              }));
-            }
           }
         }
       } catch (error: any) {
@@ -169,220 +216,121 @@ export default function JournalEntryForm({
     };
     
     fetchMonthlyPeriods();
-  }, [mode]);
+  }, [mode, entry]);
 
-  // Inicializar el formulario
+  // Inicializar el formulario (lógica combinada para creación y edición)
   useEffect(() => {
-    if (mode === 'create') {
-      // Inicializar con valores predeterminados para un nuevo asiento
-      const defaultPeriod = monthlyPeriods.find(p => !p.is_closed && p.is_active);
-      
+    if (isEditMode && entry && entryItems) {
+      // Cargar datos de un asiento existente (regular o ajuste)
       setFormData({
-        date: format(new Date(), 'yyyy-MM-dd'),
-        description: '',
-        monthly_period_id: defaultPeriod?.id || '',
-        accounting_period_id: defaultPeriod?.fiscal_year_id || '',
-        notes: '',
-        reference_number: '',
-        reference_date: undefined
-      });
-      
-      // Crear dos líneas obligatorias, una de débito y otra de crédito
-      const debitLine = {
-        temp_id: uuidv4(),
-        account_id: '',
-        description: '',
-        is_debit: true,
-        amount: undefined
-      };
-      
-      const creditLine = {
-        temp_id: uuidv4(),
-        account_id: '',
-        description: '',
-        is_debit: false,
-        amount: undefined
-      };
-      
-      setItems([debitLine, creditLine]);
-      setDataLoaded(true);
-    } else if (entry && entryItems && (mode === 'edit' || mode === 'view')) {
-      // Cargar datos de un asiento existente
-      setFormData({
-        date: entry.date || '',
+        date: entry.date || format(new Date(), 'yyyy-MM-dd'),
         description: entry.description || '',
         monthly_period_id: entry.monthly_period_id || '',
         accounting_period_id: entry.accounting_period_id || '',
         notes: entry.notes || '',
         reference_number: entry.reference_number || '',
-        reference_date: entry.reference_date || undefined
+        reference_date: entry.reference_date || undefined,
+        is_adjustment: entry.is_adjustment ?? isAdjustmentMode,
+        adjustment_type: entry.adjustment_type || null,
+        adjusted_entry_id: entry.adjusted_entry_id || null,
       });
       
       // Formatear líneas existentes
-      const formattedItems = entryItems.map(item => ({
+      const formattedItems = entryItems.map((item): JournalEntryItem => ({
           id: item.id,
+          journal_entry_id: item.journal_entry_id,
           account_id: item.account_id,
-        description: item.description,
-        is_debit: parseFloat(item.debit) > 0,
-        amount: parseFloat(item.debit) > 0 ? parseFloat(item.debit) : parseFloat(item.credit),
-        temp_id: uuidv4(),
-          account: item.account
-        }));
-
+          description: item.description,
+          is_debit: typeof item.is_debit === 'boolean' ? item.is_debit : (parseFloat(item.debit || '0') > 0),
+          amount: typeof item.amount === 'number' ? item.amount : (parseFloat(item.debit || '0') > 0 ? parseFloat(item.debit || '0') : parseFloat(item.credit || '0')),
+          debit: parseFloat(item.debit || '0'),
+          credit: parseFloat(item.credit || '0'),
+          temp_id: item.id || uuidv4()
+      }));
       setItems(formattedItems);
       setDataLoaded(true);
-    }
-  }, [mode, entry, entryItems, monthlyPeriods]);
 
-  // Calcular totales y verificar balance cuando cambian los items
+    } else if (mode === 'create' || mode === 'create-adjustment') {
+      // Inicializar para nuevo asiento (regular o ajuste)
+      setFormData(prevData => ({
+        ...prevData,
+        date: format(new Date(), 'yyyy-MM-dd'),
+        description: isAdjustmentMode ? 'Ajuste Contable' : '',
+        is_adjustment: isAdjustmentMode,
+      }));
+      
+      // Crear dos líneas iniciales vacías
+      const debitLine = { temp_id: uuidv4(), account_id: '', description: '', is_debit: true, amount: undefined };
+      const creditLine = { temp_id: uuidv4(), account_id: '', description: '', is_debit: false, amount: undefined };
+      setItems([debitLine, creditLine]);
+      setDataLoaded(true);
+    }
+
+  }, [mode, entry, entryItems, isAdjustmentMode]);
+
+  // Calcular totales y balance cada vez que cambian los items
   useEffect(() => {
-    if (!dataLoaded) return;
-    
-    let debitSum = new Decimal(0);
-    let creditSum = new Decimal(0);
+    let debit = new Decimal(0);
+    let credit = new Decimal(0);
     
     items.forEach(item => {
-      if (item.amount && item.amount > 0) {
-        if (item.is_debit) {
-          debitSum = debitSum.plus(new Decimal(item.amount));
-    } else {
-          creditSum = creditSum.plus(new Decimal(item.amount));
-        }
-      }
-    });
-    
-    setTotalDebit(debitSum.toNumber());
-    setTotalCredit(creditSum.toNumber());
-    
-    // Verificar si está balanceado (con margen de error de 0.01 por redondeos)
-    const difference = debitSum.minus(creditSum).abs();
-    setIsBalanced(difference.lessThanOrEqualTo(new Decimal(0.01)));
-  }, [items, dataLoaded]);
-
-  // Después de las definiciones de estado, añadir la función para construir la jerarquía
-  useEffect(() => {
-    if (accounts?.length > 0) {
-      const processedAccounts = buildAccountHierarchy(accounts);
-      setHierarchicalAccounts(processedAccounts);
-    }
-  }, [accounts]);
-
-  // Función para convertir las cuentas planas en una estructura jerárquica
-  const buildAccountHierarchy = (flatAccounts: any[]): AccountOption[] => {
-    // Mapear cuentas al formato requerido
-    const accountMap = new Map<string, AccountOption>();
-    const rootAccounts: AccountOption[] = [];
-    
-    // Primer paso: convertir todas las cuentas al formato AccountOption
-    flatAccounts.forEach(acc => {
-      const accountOption: AccountOption = {
-        id: acc.id,
-        code: acc.code,
-        name: acc.name,
-        fullName: `${acc.code} - ${acc.name}`,
-        isParent: acc.is_parent || false,
-        type: acc.type,
-        nature: acc.nature,
-        parentId: acc.parent_id || null,
-        level: 0,
-        children: []
-      };
-      
-      accountMap.set(acc.id, accountOption);
-    });
-    
-    // Segundo paso: construir la jerarquía
-    flatAccounts.forEach(acc => {
-      const accountOption = accountMap.get(acc.id);
-      if (!accountOption) return;
-      
-      if (acc.parent_id && accountMap.has(acc.parent_id)) {
-        // Si tiene padre, es una cuenta hija
-        const parent = accountMap.get(acc.parent_id)!;
-        parent.children = parent.children || [];
-        accountOption.level = parent.level + 1;
-        parent.children.push(accountOption);
+      const amount = new Decimal(item.amount || 0);
+      if (item.is_debit) {
+        debit = debit.plus(amount);
       } else {
-        // Si no tiene padre, es una cuenta raíz
-        rootAccounts.push(accountOption);
+        credit = credit.plus(amount);
       }
     });
     
-    // Ordenar cuentas por código
-    const sortAccounts = (accounts: AccountOption[]): AccountOption[] => {
-      return accounts
-        .sort((a, b) => a.code.localeCompare(b.code))
-        .map(account => {
-          if (account.children && account.children.length > 0) {
-            return { ...account, children: sortAccounts(account.children) };
-          }
-          return account;
-        });
-    };
+    const debitNum = debit.toDecimalPlaces(2).toNumber();
+    const creditNum = credit.toDecimalPlaces(2).toNumber();
+    const diff = debit.minus(credit).abs().toDecimalPlaces(2).toNumber();
     
-    return sortAccounts(rootAccounts);
-  };
+    setTotalDebit(debitNum);
+    setTotalCredit(creditNum);
+    setBalanceDifference(diff);
+    setIsBalanced(diff < 0.01); 
+  }, [items]);
 
-  // Función recursiva para renderizar las opciones del selector de cuentas
+  // Renderiza las opciones del select jerárquicamente
   const renderAccountOptions = (accounts: AccountOption[], indentLevel = 0): React.ReactNode[] => {
     let options: React.ReactNode[] = [];
-    
+    const indent = ' '.repeat(indentLevel * 4);
+
     accounts.forEach(account => {
-      // Obtener la etiqueta del tipo de cuenta en español
-      const accountTypeLabel = getAccountTypeLabel(account.type);
-      
-      // Para las cuentas padre, usar un formato destacado con la categoría
-      if (account.isParent) {
+      // Solo mostrar cuentas que no son padre (cuentas de movimiento)
+      if (!account.isParent) {
         options.push(
           <option 
             key={account.id} 
-            value={account.id}
-            disabled={true} // No permitir seleccionar cuentas padre
-            className="font-bold text-gray-600"
-            style={{ 
-              paddingLeft: `${indentLevel * 10}px`,
-              backgroundColor: getCategoryColor(account.type),
-              color: '#000'
-            }}
+            value={account.id} 
+            className="text-gray-900"
           >
-            📁 {account.code} - {account.name} [{accountTypeLabel}]
-          </option>
-        );
-      } else {
-        // Para las cuentas hijas, mantener un formato simple
-        options.push(
-          <option 
-            key={account.id} 
-            value={account.id}
-            className="font-normal"
-            style={{ paddingLeft: `${indentLevel * 10 + 15}px` }}
-          >
-            └─ {account.code} - {account.name}
+            {indent}{account.fullName}
           </option>
         );
       }
       
-      // Si tiene hijos, incluirlos
+      // Seguir procesando los hijos aunque el padre no se muestre
       if (account.children && account.children.length > 0) {
         options = options.concat(renderAccountOptions(account.children, indentLevel + 1));
       }
     });
-    
     return options;
   };
 
   // Función para obtener un color de fondo según la categoría
   const getCategoryColor = (type: string): string => {
     const colors: Record<string, string> = {
-      'activo': '#e6f7ff',     // azul claro
-      'pasivo': '#fff1f0',     // rojo claro
-      'patrimonio': '#f6ffed', // verde claro
-      'ingreso': '#f9f0ff',    // morado claro
-      'costo': '#fff7e6',      // naranja claro
-      'gasto': '#fff0f6',      // rosa claro
-      'cuenta_orden': '#f5f5f5' // gris claro
+      'activo': '#0ea5e9',      // azul
+      'pasivo': '#ef4444',      // rojo
+      'patrimonio': '#22c55e',  // verde
+      'ingreso': '#8b5cf6',     // morado
+      'costo': '#f97316',       // naranja
+      'gasto': '#ec4899',       // rosa
+      'cuenta_orden': '#64748b' // gris
     };
-    return colors[type] || '#f5f5f5';
+    return colors[type] || '#64748b';
   };
 
   // Agregar una función auxiliar para obtener etiquetas de tipo de cuenta en español
@@ -403,98 +351,173 @@ export default function JournalEntryForm({
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
     
-    // Si cambia el período mensual, actualizar el período anual
-    if (name === 'monthly_period_id' && value) {
-      const selectedPeriod = monthlyPeriods.find(p => p.id === value);
-      if (selectedPeriod && selectedPeriod.fiscal_year_id) {
-        setFormData({ 
-          ...formData, 
-          [name]: value,
-          accounting_period_id: selectedPeriod.fiscal_year_id
-        });
-      } else {
-        setFormData({ ...formData, [name]: value });
+    // Actualizar el estado del formulario
+    if (name === 'adjustment_type' && isAdjustmentMode) {
+      // Actualizar descripción según el tipo de ajuste
+      const adjustmentType = value as AdjustmentType | '';
+      const newDescription = getAdjustmentDescription(adjustmentType || null);
+      setFormData(prev => ({ 
+        ...prev, 
+        [name]: adjustmentType || null,
+        description: newDescription || prev.description
+      }));
+      
+      // Si cambiamos a ciertos tipos de ajuste, podemos preseleccionar cuentas típicas
+      if (adjustmentType) {
+        applyAdjustmentTemplate(adjustmentType as AdjustmentType);
       }
     } else {
-      setFormData({ ...formData, [name]: value });
+      // Para otros campos, actualizar normalmente
+      setFormData(prev => {
+        const newData = { ...prev, [name]: value };
+        // Si cambia el período mensual, actualizar también el anual asociado
+        if (name === 'monthly_period_id') {
+          const selectedPeriod = monthlyPeriods.find(p => p.id === value);
+          if (selectedPeriod) {
+            newData.accounting_period_id = selectedPeriod.fiscal_year_id;
+          }
+        }
+        return newData;
+      });
     }
   };
   
+  // Función adicional para validar ajustes contables específicamente
+  const validateAdjustment = (
+    formData: FormData, 
+    items: JournalEntryItem[]
+  ): { valid: boolean; message: string } => {
+    // Solo necesitamos validar si es un ajuste
+    if (!formData.is_adjustment) {
+      return { valid: true, message: '' };
+    }
+    
+    // El tipo de ajuste es obligatorio
+    if (!formData.adjustment_type) {
+      return { 
+        valid: false, 
+        message: 'Debe seleccionar un tipo de ajuste' 
+      };
+    }
+    
+    // Para ajustes de tipo corrección, el asiento a corregir es obligatorio
+    if (formData.adjustment_type === 'correction' && !formData.adjusted_entry_id) {
+      return { 
+        valid: false, 
+        message: 'Para ajustes de corrección, debe seleccionar el asiento a corregir' 
+      };
+    }
+    
+    // Validar que la descripción sea coherente con el tipo de ajuste
+    if (!formData.description.toLowerCase().includes('ajuste') && 
+        !formData.description.toLowerCase().includes('adjustment')) {
+      console.warn('La descripción no menciona que es un ajuste, pero se dejará continuar');
+    }
+    
+    // Verificar que hay suficientes líneas para el ajuste (mínimo 2)
+    if (items.length < 2) {
+      return {
+        valid: false,
+        message: 'Un ajuste contable debe tener al menos una línea de débito y una de crédito'
+      };
+    }
+    
+    // Todo está bien
+    return { valid: true, message: '' };
+  };
+
   // Validar el formulario
   const validateForm = async (): Promise<boolean> => {
-    // Verificar campos obligatorios
-    if (!formData.date || !formData.description || !formData.monthly_period_id) {
-      toast.error('Por favor complete todos los campos obligatorios');
+    // Validar fecha
+    if (!formData.date || !isValid(parseISO(formData.date))) {
+      toast.error('La fecha del asiento no es válida.');
       return false;
     }
     
-    // Verificar que haya al menos dos líneas
+    // Validar período mensual
+    if (!formData.monthly_period_id) {
+      toast.error('Debe seleccionar un período contable mensual.');
+      return false;
+    }
+    
+    // Validar fecha dentro del período
+    const dateValidation = await validateDateInPeriod(formData.date, formData.monthly_period_id);
+    if (!dateValidation.valid) {
+      toast.error(dateValidation.message);
+      return false;
+    }
+
+    // Validar descripción
+    if (!formData.description.trim()) {
+      toast.error('La descripción del asiento es obligatoria.');
+      return false;
+    }
+    
+    // Validar líneas
     if (items.length < 2) {
-      toast.error('El asiento debe tener al menos dos líneas');
+      toast.error('El asiento debe tener al menos una línea de débito y una de crédito.');
       return false;
     }
     
-    // Verificar que todas las líneas tengan cuenta y monto
     for (const item of items) {
-      if (!item.account_id || !item.amount) {
-        toast.error('Todas las líneas deben tener cuenta y monto');
+      if (!item.account_id) {
+        toast.error('Todas las líneas deben tener una cuenta seleccionada.');
         return false;
       }
-      
-      // Verificar que no se seleccionen cuentas padre
-      const selectedAccount = findAccountById(hierarchicalAccounts, item.account_id);
-      if (selectedAccount && selectedAccount.isParent) {
-        toast.error(`La cuenta "${selectedAccount.fullName}" es una cuenta de grupo y no puede usarse en transacciones.`);
+      if (item.amount === undefined || item.amount === null || isNaN(item.amount) || item.amount <= 0) {
+          const accountName = hierarchicalAccounts.flatMap(a => [a, ...(a.children || [])]).find(a => a.id === item.account_id)?.name || 'Desconocida';
+        toast.error(`El monto para la cuenta "${accountName}" debe ser un número positivo.`);
         return false;
+      }
+      // Validar que no se usen cuentas padre (ya se hace en el select, pero doble check)
+      const accountOption = findAccountRecursive(hierarchicalAccounts, item.account_id);
+      if (accountOption && accountOption.isParent) {
+          toast.error(`La cuenta "${accountOption.fullName}" es una cuenta padre y no puede usarse en asientos.`);
+          return false;
       }
     }
     
-    // Verificar que el asiento esté balanceado
-    if (!isBalanced) {
-      toast.error('El asiento no está balanceado');
+    // Validar balance
+    const balanceValidation = validateBalance(items);
+    if (!balanceValidation.valid) {
+      toast.error(balanceValidation.message);
+      // Podríamos permitir guardar desbalanceado y marcarlo, pero por ahora lo impedimos.
       return false;
     }
-    
-    // Validar fecha en el período
-    try {
-      const validation = await validateDateInPeriod(formData.date, formData.monthly_period_id);
-      if (!validation.valid) {
-        toast.error(validation.message);
+
+    // Validaciones específicas para ajustes
+    if (isAdjustmentMode) {
+      const adjustmentValidation = validateAdjustment(formData, items);
+      if (!adjustmentValidation.valid) {
+        toast.error(adjustmentValidation.message);
         return false;
       }
-    } catch (error: any) {
-      toast.error(error.message || 'Error al validar la fecha');
-      return false;
     }
     
     return true;
   };
-  
-  // Función auxiliar para encontrar una cuenta por ID
-  const findAccountById = (accounts: AccountOption[], id: string): AccountOption | null => {
-    for (const account of accounts) {
-      if (account.id === id) {
-        return account;
+
+  // Función recursiva para buscar cuenta en la jerarquía
+  const findAccountRecursive = (accounts: AccountOption[], id: string): AccountOption | null => {
+      for (const account of accounts) {
+          if (account.id === id) return account;
+          if (account.children) {
+              const found = findAccountRecursive(account.children, id);
+              if (found) return found;
+          }
       }
-      if (account.children && account.children.length > 0) {
-        const foundInChildren = findAccountById(account.children, id);
-        if (foundInChildren) {
-          return foundInChildren;
-        }
-      }
-    }
-    return null;
+      return null;
   };
   
   // Agregar una línea vacía
   const addEmptyLine = (): JournalEntryItem => {
-    return {
-      temp_id: uuidv4(),
-      account_id: '',
-      description: '',
-          is_debit: true,
-      amount: undefined
-    };
+      return { 
+          temp_id: uuidv4(), 
+          account_id: '', 
+          description: '', 
+          is_debit: true, // Por defecto débito, puede cambiar
+          amount: undefined 
+      };
   };
   
   // Agregar línea
@@ -504,158 +527,89 @@ export default function JournalEntryForm({
   
   // Eliminar línea
   const handleRemoveLine = (tempId: string) => {
-    if (items.length <= 2) {
-        toast.error('El asiento debe tener al menos dos líneas');
+    if (items.length <= 2 && !isViewMode) { // No permitir menos de 2 líneas en modo edición/creación
+        toast.warn('Un asiento debe tener al menos dos líneas.');
         return;
-      }
+    }
     setItems(items.filter(item => item.temp_id !== tempId));
   };
   
   // Actualizar una línea
-  const handleItemChange = (tempId: string, field: string, value: any) => {
-    const updatedItems = items.map(item => {
-      if (item.temp_id === tempId) {
-        if (field === 'is_debit') {
-          // Si cambia el tipo (débito/crédito), mantener el monto
-          return { ...item, [field]: value };
-        } else {
-          return { ...item, [field]: value };
+  const handleItemChange = (tempId: string, field: keyof JournalEntryItem, value: any) => {
+    setItems(currentItems => 
+      currentItems.map(item => {
+        if (item.temp_id === tempId) {
+          const updatedItem = { ...item, [field]: value };
+          
+          // Si cambia el monto o si es débito/crédito, recalcular
+          if (field === 'amount' || field === 'is_debit') {
+            const amount = parseFloat(updatedItem.amount?.toString() || '0');
+            if (!isNaN(amount)) {
+              updatedItem.debit = updatedItem.is_debit ? amount : 0;
+              updatedItem.credit = updatedItem.is_debit ? 0 : amount;
+            } else {
+                 updatedItem.debit = 0;
+                 updatedItem.credit = 0;
+             }
+          }
+          // Si cambia la cuenta, actualizar descripción por defecto?
+          // if (field === 'account_id') { ... }
+          return updatedItem;
         }
-      }
-      return item;
-    });
-    setItems(updatedItems);
+        return item;
+      })
+    );
   };
   
   // Guardar el asiento
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    e.stopPropagation(); // Evitar propagación del evento
+    e.stopPropagation(); 
     
-    if (isViewMode) {
-      onCancel();
-      return;
-    }
-    
-    // Verificar que el usuario esté autenticado
-    if (!user?.id) {
-      toast.error('Debes iniciar sesión para realizar esta acción');
-      return;
-    }
-    
-    const isValid = await validateForm();
-    if (!isValid) {
+    if (isViewMode || !user?.id || !(await validateForm())) {
+      if (!user?.id) toast.error('Debes iniciar sesión.');
       return;
     }
     
     setSaving(true);
     
     try {
-      // Preparar los datos del formulario para evitar problemas con fechas vacías
-      const processedFormData: JournalFormData = {
-        date: formData.date,
-        description: formData.description,
-        monthly_period_id: formData.monthly_period_id,
-        accounting_period_id: formData.accounting_period_id,
-        notes: formData.notes || '',
-        reference_number: formData.reference_number || '',
-        reference_date: formData.reference_date && formData.reference_date.trim() !== '' 
-          ? formData.reference_date 
-          : undefined
+      const submissionData: JournalFormData = {
+        ...formData,
+        is_adjustment: isAdjustmentMode,
+        adjustment_type: isAdjustmentMode ? formData.adjustment_type : null,
+        adjusted_entry_id: isAdjustmentMode ? formData.adjusted_entry_id : null,
+        notes: formData.notes || '', 
+        reference_number: formData.reference_number || '', 
+        reference_date: formData.reference_date || undefined,
       };
-      
-      // Formatear los items para el servicio, asegurando que los valores numéricos sean correctos
-      const formattedItems = items.map(item => {
-        // Asegurar que los valores numéricos sean números y no undefined/null/string
-        const amount = typeof item.amount === 'number' ? item.amount : 0;
-        
-        return {
+
+      const formattedItems = items.map(item => ({
+          ...(item.id && { id: item.id }),
+          journal_entry_id: entryId,
           account_id: item.account_id,
           description: item.description || '',
-          debit: item.is_debit ? amount : 0,
-          credit: !item.is_debit ? amount : 0,
-          // Si hay ID y journal_entry_id, mantenerlos para actualización
-          ...(item.id && { id: item.id }),
-          ...(item.journal_entry_id && { journal_entry_id: item.journal_entry_id })
-        };
-      });
+          debit: item.is_debit ? (item.amount || 0) : 0,
+          credit: !item.is_debit ? (item.amount || 0) : 0,
+      }));
       
-      // Verificar si hay cuentas repetidas
-      const accountIds = formattedItems.map(item => item.account_id);
-      const duplicateAccounts = accountIds.filter((id, index) => 
-        accountIds.indexOf(id) !== index
-      );
-      
-      if (duplicateAccounts.length > 0) {
-        // Buscar los nombres de las cuentas duplicadas
-        const duplicateNames = duplicateAccounts.map(id => {
-          const account = findAccountById(hierarchicalAccounts, id);
-          return account ? account.fullName : id;
-        });
-        
-        toast.error(`Hay cuentas duplicadas: ${duplicateNames.join(', ')}`);
-        setSaving(false);
-        return;
+      if (isEditMode && entryId) {
+        const { error } = await updateJournalEntry(entryId, submissionData, formattedItems, user.id);
+        if (error) throw error;
+        toast.success('Asiento actualizado correctamente');
+        onFinish(entryId);
+      } else {
+        const { id: newEntryId, error } = await createJournalEntry(submissionData, formattedItems, user.id);
+        if (error) throw error;
+        if (!newEntryId) throw new Error('No se recibió ID del nuevo asiento');
+        toast.success('Asiento creado correctamente');
+        onFinish(newEntryId);
       }
       
-      console.log('Datos a enviar:', { 
-        formData: processedFormData, 
-        items: formattedItems,
-        user_id: user.id 
-      });
-      
-      // Crear o actualizar el asiento
-      if (mode === 'create') {
-        try {
-          // Usar el servicio para crear un nuevo asiento
-          const entryId = await createJournalEntry(
-            processedFormData,
-            formattedItems, // Usar los items formateados correctamente
-            user.id
-          );
-          
-          if (entryId) {
-            toast.success('Asiento contable creado correctamente');
-            onFinish(entryId);
-          } else {
-            toast.error('No se pudo crear el asiento contable');
-          }
-        } catch (createError: any) {
-          console.error('Error específico al crear asiento:', createError);
-          toast.error(`Error al crear el asiento: ${createError.message || 'Error desconocido'}`);
-        }
-      } else if (mode === 'edit' && entryId) {
-        try {
-          // Usar el servicio para actualizar un asiento existente
-          await updateJournalEntry(
-            entryId,
-            processedFormData,
-            formattedItems, // Usar los items formateados correctamente
-            user.id
-          );
-          
-          toast.success('Asiento contable actualizado correctamente');
-          onFinish(entryId);
-        } catch (updateError: any) {
-          console.error('Error específico al actualizar asiento:', updateError);
-          toast.error(`Error al actualizar el asiento: ${updateError.message || 'Error desconocido'}`);
-        }
-      }
     } catch (error: any) {
-      console.error('Error general al guardar asiento contable:', error);
-      
-      // Mensaje de error más específico según el tipo de error
-      let errorMessage = 'Error desconocido';
-      
-      if (error.message) {
-        errorMessage = error.message;
-      } else if (error.error && error.error.message) {
-        errorMessage = error.error.message;
-      } else if (typeof error === 'string') {
-        errorMessage = error;
-      }
-      
-      toast.error(`Error al guardar el asiento contable: ${errorMessage}`);
+      console.error('Error al guardar asiento:', error);
+      toast.error(`Error al guardar: ${error.message || 'Ocurrió un error inesperado'}`);
+      onFinish(null);
     } finally {
       setSaving(false);
     }
@@ -663,25 +617,194 @@ export default function JournalEntryForm({
   
   // Cancelar
   const handleCancel = () => {
-    onCancel();
+      if (!saving) {
+          onCancel();
+      }
   };
   
-  // Renderizar
+  // Agregar una función para obtener el estilo del select según el modo
+  const getSelectStyle = (isDisabled: boolean): React.CSSProperties => {
+    return {
+        backgroundColor: isDisabled ? '#f3f4f6' : 'white',
+        borderColor: isDisabled ? '#d1d5db' : '#e5e7eb',
+        cursor: isDisabled ? 'not-allowed' : 'pointer',
+        // Agrega otros estilos necesarios
+    };
+  };
+  
+  // En useEffect para cargar datos, añadir cargar de entradas
+  useEffect(() => {
+    // Cargar entradas si estamos en modo ajuste para poder seleccionar
+    if (isAdjustmentMode) {
+      const fetchAvailableEntries = async () => {
+        try {
+          const { data, error } = await supabase
+            .from('journal_entries')
+            .select('id, entry_number, description, date')
+            .eq('is_adjustment', false) // Solo mostrar asientos regulares, no otros ajustes
+            .order('date', { ascending: false });
+          
+          if (error) throw error;
+          setEntries(data || []);
+        } catch (error) {
+          console.error("Error al cargar asientos disponibles:", error);
+          // No mostrar toast para evitar saturación de errores
+          setEntries([]);
+        }
+      };
+      
+      fetchAvailableEntries();
+    }
+  }, [isAdjustmentMode]);
+
+  // Si los datos aún no están listos (especialmente en edición), mostrar carga
+  if (!dataLoaded && (mode === 'edit' || mode === 'view' || mode === 'edit-adjustment')) {
+    return <div className="p-6 text-center">Cargando datos del asiento...</div>;
+  }
+  
+  // En modo creación, podemos mostrar el formulario aunque no estén cargados todos los datos
+  if (mode === 'create' || mode === 'create-adjustment') {
+    // Asegurarse de que dataLoaded se establezca a true si está en modo creación
+    if (!dataLoaded) {
+      setDataLoaded(true);
+    }
+  }
+
+  // Título del formulario dinámico
+  const formTitle = isViewMode 
+    ? 'Ver Asiento Contable' 
+    : isEditMode
+      ? (isAdjustmentMode ? 'Editar Ajuste Contable' : 'Editar Asiento Contable')
+      : (isAdjustmentMode ? 'Nuevo Ajuste Contable' : 'Nuevo Asiento Contable');
+
+  // Añadir función para obtener descripción del tipo de ajuste
+  const getAdjustmentTypeDescription = (type: AdjustmentType): string => {
+    switch (type) {
+      case 'depreciation':
+        return "Ajuste para registrar la depreciación periódica de activos fijos.";
+      case 'amortization':
+        return "Ajuste para distribuir el costo de activos intangibles a lo largo de su vida útil.";
+      case 'accrual':
+        return "Reconocimiento de ingresos o gastos cuando ocurren, independiente del flujo de efectivo.";
+      case 'deferred':
+        return "Ajuste para registrar gastos o ingresos pagados o cobrados por anticipado.";
+      case 'inventory':
+        return "Ajuste al valor de inventarios basado en conteo físico o revaluación.";
+      case 'correction':
+        return "Corrección de errores en asientos contables previos.";
+      case 'provision':
+        return "Estimación de obligaciones futuras probables (deterioro, obsolescencia, etc.).";
+      case 'valuation':
+        return "Actualización del valor de activos o pasivos a su valor razonable o recuperable.";
+      case 'other':
+        return "Otros ajustes contables que no encajan en las categorías anteriores.";
+      default:
+        return "";
+    }
+  };
+
+  // Obtener descripción predeterminada según tipo de ajuste
+  const getAdjustmentDescription = (type: AdjustmentType | null): string => {
+    if (!type) return '';
+    
+    const descriptions: Record<AdjustmentType, string> = {
+      'depreciation': 'Ajuste por depreciación de activos fijos',
+      'amortization': 'Ajuste por amortización de activos intangibles',
+      'accrual': 'Ajuste por devengo de gastos/ingresos',
+      'deferred': 'Ajuste por gastos/ingresos diferidos',
+      'inventory': 'Ajuste por valuación de inventario',
+      'correction': 'Corrección de asiento contable',
+      'provision': 'Ajuste por provisión de gastos/pérdidas',
+      'valuation': 'Ajuste por valoración de activos/pasivos',
+      'other': 'Ajuste contable'
+    };
+    
+    return descriptions[type];
+  };
+
+  // Aplicar plantilla según tipo de ajuste (preseleccionar cuentas comunes)
+  const applyAdjustmentTemplate = (type: AdjustmentType) => {
+    // Solo aplicar si tenemos 2 o menos líneas (asumiendo que son las líneas iniciales vacías)
+    if (items.length > 2) {
+      return; // No aplicar plantilla si ya hay líneas personalizadas
+    }
+    
+    // Buscar cuentas relevantes para el tipo de ajuste
+    let relevantAccounts: {debit?: string[], credit?: string[]} = { debit: [], credit: [] };
+    
+    switch(type) {
+      case 'depreciation':
+        // Buscar cuentas de depreciación y activos fijos
+        relevantAccounts.debit = ['depreciation', 'gasto', 'depreciación'];
+        relevantAccounts.credit = ['depreciation', 'acumulada', 'depreciación'];
+        break;
+      case 'amortization':
+        relevantAccounts.debit = ['amortization', 'amortización', 'gasto'];
+        relevantAccounts.credit = ['amortization', 'amortización', 'acumulada'];
+        break;
+      case 'accrual':
+        relevantAccounts.debit = ['gasto', 'expense'];
+        relevantAccounts.credit = ['accrued', 'por pagar', 'provisión'];
+        break;
+      case 'inventory':
+        relevantAccounts.debit = ['inventory', 'inventario', 'costo'];
+        relevantAccounts.credit = ['inventory', 'inventario', 'mercancía'];
+        break;
+      // Otros casos...
+    }
+    
+    // Buscar cuentas que coincidan con las palabras clave
+    const matchAccounts = (keywords: string[], isDebit: boolean) => {
+      // Obtener todas las cuentas en formato plano (para búsqueda más fácil)
+      const allAccounts = flatAccounts.filter(acc => !acc.isParent);
+      
+      // Buscar coincidencias en nombre o código
+      for (const keyword of keywords) {
+        const matchingAccounts = allAccounts.filter(acc => 
+          acc.name.toLowerCase().includes(keyword.toLowerCase()) || 
+          acc.code.toLowerCase().includes(keyword.toLowerCase())
+        );
+        
+        if (matchingAccounts.length > 0) {
+          // Encontramos coincidencias, usar la primera
+          const newItems = [...items];
+          // Actualizar el item correspondiente (débito o crédito)
+          const itemIndex = newItems.findIndex(item => item.is_debit === isDebit);
+          if (itemIndex >= 0) {
+            newItems[itemIndex] = {
+              ...newItems[itemIndex],
+              account_id: matchingAccounts[0].id,
+              description: `${getAdjustmentDescription(type)} - ${matchingAccounts[0].name}`
+            };
+            setItems(newItems);
+          }
+          return true;
+        }
+      }
+      return false;
+    };
+    
+    // Aplicar búsqueda para débito y crédito
+    if (relevantAccounts.debit && relevantAccounts.debit.length > 0) {
+      matchAccounts(relevantAccounts.debit, true);
+    }
+    if (relevantAccounts.credit && relevantAccounts.credit.length > 0) {
+      matchAccounts(relevantAccounts.credit, false);
+    }
+  };
+
   return (
-    <div className="bg-white shadow-lg rounded-lg p-6">
+    <div className="bg-white shadow-sm rounded-lg p-6">
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Encabezado del formulario */}
         <div className="border-b border-gray-200 pb-4">
-          <h2 className="text-xl font-semibold text-gray-800">
-            {mode === 'create' ? 'Crear nuevo asiento contable' : 
-             mode === 'edit' ? 'Editar asiento contable' : 
-             'Detalles del asiento contable'}
+          <h2 className="text-xl font-semibold text-gray-800 flex items-center">
+            {isAdjustmentMode && <Info size={20} className="mr-2 text-purple-600" />} 
+            {formTitle}
           </h2>
-          <p className="text-sm text-gray-500 mt-1">
-            {isBalanced ? 
-              'El asiento está correctamente balanceado' : 
-              'Complete todos los campos y asegúrese que el asiento esté balanceado'}
-          </p>
+          {entry?.entry_number && (
+              <span className="text-sm text-gray-500 ml-2">#{entry.entry_number}</span>
+          )}
         </div>
 
         {/* Encabezado del asiento - Rediseñado con cards */}
@@ -802,6 +925,66 @@ export default function JournalEntryForm({
               </div>
             </div>
 
+            {/* SECCIÓN DE AJUSTES CONTABLES */}
+            {(isAdjustmentMode || (formData.is_adjustment && isViewMode)) && (
+              <div className="bg-blue-50 p-4 rounded-lg mt-4 border border-blue-200">
+                <h3 className="text-sm font-medium text-blue-700 mb-3 flex items-center">
+                  <Info size={16} className="mr-2" /> 
+                  Información de Ajuste Contable
+                </h3>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700">
+                      Tipo de Ajuste <span className="text-red-600">*</span>
+                    </label>
+                    <select
+                      name="adjustment_type"
+                      value={formData.adjustment_type || ''}
+                      onChange={handleChange}
+                      disabled={isViewMode}
+                      className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                      required
+                    >
+                      <option value="">Seleccione un tipo de ajuste</option>
+                      {adjustmentTypes.map(type => (
+                        <option key={type.value} value={type.value}>
+                          {type.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  {formData.adjustment_type === 'correction' && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">
+                        Asiento a Corregir
+                      </label>
+                      <select
+                        name="adjusted_entry_id"
+                        value={formData.adjusted_entry_id || ''}
+                        onChange={handleChange}
+                        disabled={isViewMode}
+                        className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                      >
+                        <option value="">Seleccione asiento a corregir</option>
+                        {entries.map(e => (
+                          <option key={e.id} value={e.id}>
+                            {e.entry_number} - {e.description} ({e.date})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  
+                  {formData.adjustment_type && (
+                    <div className="bg-blue-100 p-3 rounded text-sm text-blue-800">
+                      {getAdjustmentTypeDescription(formData.adjustment_type)}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="bg-gray-50 p-4 rounded-lg">
               <h3 className="text-sm font-medium text-gray-700 mb-3">Estado del asiento</h3>
               <div className="flex items-center space-x-2">
@@ -885,14 +1068,16 @@ export default function JournalEntryForm({
                     <tr key={item.temp_id || index} className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
                       <td className="px-4 py-3">
                         <select
-                          value={item.account_id}
+                          value={item.account_id || ''}
                           onChange={(e) => handleItemChange(item.temp_id || '', 'account_id', e.target.value)}
                           disabled={isViewMode}
-                          className="block w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500"
-                          required
+                          style={getSelectStyle(isViewMode)}
+                          className="block w-full shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
                         >
                           <option value="">Seleccionar cuenta</option>
-                          {renderAccountOptions(hierarchicalAccounts)}
+                          <optgroup label="Cuentas Contables">
+                            {renderAccountOptions(hierarchicalAccounts)}
+                          </optgroup>
                         </select>
                       </td>
                       <td className="px-4 py-3">

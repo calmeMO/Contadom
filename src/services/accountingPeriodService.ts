@@ -17,6 +17,10 @@ export interface AccountingPeriod {
   notes?: string | null;
   year?: number;
   month?: number;
+  closed_by_email?: string;
+  reopened_by_email?: string;
+  reclosed_by_email?: string;
+  created_by_email?: string;
 }
 
 export interface MonthlyPeriod {
@@ -41,6 +45,10 @@ export interface MonthlyPeriod {
   reclosed_at?: string;
   reclosed_by?: string;
   fiscal_year_name?: string;
+  closed_by_email?: string;
+  reopened_by_email?: string;
+  reclosed_by_email?: string;
+  created_by_email?: string;
 }
 
 // Interfaces
@@ -71,6 +79,10 @@ export interface FiscalYear {
   fiscal_year_type: 'calendar' | 'custom';
   months?: MonthlyPeriod[];
   monthly_periods?: MonthlyPeriod[];
+  closed_by_email?: string;
+  reopened_by_email?: string;
+  reclosed_by_email?: string;
+  created_by_email?: string;
 }
 
 export interface PeriodForm {
@@ -87,7 +99,7 @@ export interface PeriodForm {
 export async function fetchAccountingPeriods(): Promise<AccountingPeriod[]> {
   try {
     const { data, error } = await supabase
-      .from('accounting_periods')
+      .from('accounting_periods_with_users')
       .select('*')
       .order('start_date', { ascending: false });
       
@@ -106,7 +118,7 @@ export async function fetchAccountingPeriods(): Promise<AccountingPeriod[]> {
 export async function getAccountingPeriodById(id: string): Promise<AccountingPeriod | null> {
   try {
     const { data, error } = await supabase
-      .from('accounting_periods')
+      .from('accounting_periods_with_users')
       .select('*')
       .eq('id', id)
       .single();
@@ -125,7 +137,7 @@ export async function getAccountingPeriodById(id: string): Promise<AccountingPer
 export async function fetchAnnualPeriods(): Promise<AccountingPeriod[]> {
   try {
     const { data, error } = await supabase
-      .from('accounting_periods')
+      .from('accounting_periods_with_users')
       .select('*')
       .eq('is_annual', true)
       .order('start_date', { ascending: false });
@@ -145,7 +157,7 @@ export async function fetchAnnualPeriods(): Promise<AccountingPeriod[]> {
 export async function fetchMonthlyPeriods(annualPeriodId: string): Promise<AccountingPeriod[]> {
   try {
     const { data, error } = await supabase
-      .from('accounting_periods')
+      .from('accounting_periods_with_users')
       .select('*')
       .eq('parent_id', annualPeriodId)
       .order('start_date');
@@ -272,76 +284,169 @@ export function generateMonthlyPeriods(
 }
 
 /**
+ * Cierra un período mensual permanentemente (no puede ser reabierto)
+ */
+export async function closeMonthlyPeriod(
+  periodId: string,
+  userId: string,
+  notes?: string
+): Promise<{ success: boolean; error: any }> {
+  try {
+    // Verificar que el período existe y está activo
+    const { data: period, error: checkError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('*')
+      .eq('id', periodId)
+      .single();
+    
+    if (checkError) throw checkError;
+    
+    if (!period) {
+      return { success: false, error: 'Período no encontrado' };
+    }
+    
+    if (period.is_closed) {
+      return { success: false, error: 'El período ya está cerrado permanentemente' };
+    }
+    
+    // Cerrar el período
+    const { error } = await supabase
+      .from('monthly_accounting_periods')
+      .update({
+        is_closed: true,
+        is_active: false,
+        closed_at: new Date().toISOString(),
+        closed_by: userId,
+        notes: notes,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', periodId);
+    
+    if (error) throw error;
+    
+    return { success: true, error: null };
+  } catch (error) {
+    console.error('Error al cerrar período mensual:', error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Reabre un período mensual
+ */
+export async function reopenMonthlyPeriod(
+  periodId: string,
+  userId: string,
+  notes?: string
+): Promise<{ success: boolean; error: any }> {
+  try {
+    // Verificar que el período existe y está cerrado
+    const { data: period, error: checkError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('*')
+      .eq('id', periodId)
+      .single();
+    
+    if (checkError) throw checkError;
+    
+    if (!period) {
+      return { success: false, error: 'Período no encontrado' };
+    }
+    
+    if (!period.is_closed) {
+      return { success: false, error: 'El período ya está abierto' };
+    }
+    
+    // Reabrir el período
+    const { error } = await supabase
+      .from('monthly_accounting_periods')
+      .update({
+        is_closed: false,
+        is_reopened: true,
+        reopened_at: new Date().toISOString(),
+        reopened_by: userId,
+        notes: notes,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', periodId);
+    
+    if (error) throw error;
+    
+    return { success: true, error: null };
+  } catch (error) {
+    console.error('Error al reabrir período mensual:', error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Vuelve a cerrar un período mensual reabierto
+ */
+export async function recloseMonthlyPeriod(
+  periodId: string,
+  userId: string,
+  notes?: string
+): Promise<{ success: boolean; error: any }> {
+  try {
+    // Verificar que el período existe y está reabierto
+    const { data: period, error: checkError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('*')
+      .eq('id', periodId)
+      .single();
+    
+    if (checkError) throw checkError;
+    
+    if (!period) {
+      return { success: false, error: 'Período no encontrado' };
+    }
+    
+    if (!period.is_reopened) {
+      return { success: false, error: 'El período no ha sido reabierto previamente' };
+    }
+    
+    // Volver a cerrar el período
+    const { error } = await supabase
+      .from('monthly_accounting_periods')
+      .update({
+        is_closed: true,
+        reclosed_at: new Date().toISOString(),
+        reclosed_by: userId,
+        notes: notes,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', periodId);
+    
+    if (error) throw error;
+    
+    return { success: true, error: null };
+  } catch (error) {
+    console.error('Error al volver a cerrar período mensual:', error);
+    return { success: false, error };
+  }
+}
+
+/**
  * Cierra un período contable
  */
 export async function closePeriod(periodId: string, userId: string, notes?: string): Promise<boolean> {
   try {
-    // 1. Verificar si el período ya está cerrado
-    const { data: period, error: periodError } = await supabase
-      .from('accounting_periods')
-      .select('*')
-      .eq('id', periodId)
-      .single();
-      
-    if (periodError) throw periodError;
-    
-    if (period.is_closed) {
-      toast.warning('Este período ya está cerrado');
-      return false;
-    }
-    
-    // 2. Si es un período mensual, verificar que no haya asientos pendientes
-    if (!period.is_annual) {
-      const { count, error: countError } = await supabase
-        .from('journal_entries')
-        .select('id', { count: 'exact', head: true })
-        .eq('accounting_period_id', periodId)
-        .eq('is_approved', false);
-        
-      if (countError) throw countError;
-      
-      if (count && count > 0) {
-        toast.error(`No se puede cerrar el período porque hay ${count} asientos pendientes de aprobar`);
-        return false;
-      }
-    }
-    
-    // 3. Realizar el cierre del período
-    const { error: updateError } = await supabase
+    const { error } = await supabase
       .from('accounting_periods')
       .update({
         is_closed: true,
         closed_at: new Date().toISOString(),
         closed_by: userId,
-        notes: notes || null
+        notes: notes,
+        updated_at: new Date().toISOString()
       })
       .eq('id', periodId);
-      
-    if (updateError) throw updateError;
-    
-    // 4. Si es un período anual, cerrar también los períodos mensuales
-    if (period.is_annual) {
-      const { error: monthlyUpdateError } = await supabase
-        .from('accounting_periods')
-        .update({
-          is_closed: true,
-          closed_at: new Date().toISOString(),
-          closed_by: userId
-        })
-        .eq('parent_id', periodId)
-        .eq('is_closed', false);
-        
-      if (monthlyUpdateError) {
-        console.error('Error closing monthly periods:', monthlyUpdateError);
-        // No interrumpimos el flujo, ya se cerró el período anual
-      }
-    }
-    
-    toast.success('Período contable cerrado con éxito');
+
+    if (error) throw error;
     return true;
   } catch (error) {
-    console.error('Error closing accounting period:', error);
-    toast.error('Error al cerrar el período contable');
+    console.error('Error closing period:', error);
+    toast.error('Error al cerrar el período');
     return false;
   }
 }
@@ -349,72 +454,25 @@ export async function closePeriod(periodId: string, userId: string, notes?: stri
 /**
  * Reabre un período contable
  */
-export async function reopenPeriod(periodId: string): Promise<boolean> {
+export async function reopenPeriod(periodId: string, userId: string, notes?: string): Promise<boolean> {
   try {
-    // 1. Verificar si el período está cerrado
-    const { data: period, error: periodError } = await supabase
-      .from('accounting_periods')
-      .select('*')
-      .eq('id', periodId)
-      .single();
-      
-    if (periodError) throw periodError;
-    
-    if (!period.is_closed) {
-      toast.warning('Este período ya está abierto');
-      return false;
-    }
-    
-    // 2. Si es un período mensual, verificar que el período anual no esté cerrado
-    if (!period.is_annual && period.parent_id) {
-      const { data: parentPeriod, error: parentError } = await supabase
-        .from('accounting_periods')
-        .select('is_closed')
-        .eq('id', period.parent_id)
-        .single();
-        
-      if (parentError) throw parentError;
-      
-      if (parentPeriod.is_closed) {
-        toast.error('No se puede reabrir el período mensual porque el período anual está cerrado');
-        return false;
-      }
-    }
-    
-    // 3. Reabrir el período
-    const { error: updateError } = await supabase
+    const { error } = await supabase
       .from('accounting_periods')
       .update({
         is_closed: false,
-        closed_at: null,
-        closed_by: null
+        is_reopened: true,
+        reopened_at: new Date().toISOString(),
+        reopened_by: userId,
+        notes: notes,
+        updated_at: new Date().toISOString()
       })
       .eq('id', periodId);
-      
-    if (updateError) throw updateError;
-    
-    // 4. Si es un período anual, reabrir también los períodos mensuales
-    if (period.is_annual) {
-      const { error: monthlyUpdateError } = await supabase
-        .from('accounting_periods')
-        .update({
-          is_closed: false,
-          closed_at: null,
-          closed_by: null
-        })
-        .eq('parent_id', periodId);
-        
-      if (monthlyUpdateError) {
-        console.error('Error reopening monthly periods:', monthlyUpdateError);
-        // No interrumpimos el flujo, ya se reabrió el período anual
-      }
-    }
-    
-    toast.success('Período contable reabierto con éxito');
+
+    if (error) throw error;
     return true;
   } catch (error) {
-    console.error('Error reopening accounting period:', error);
-    toast.error('Error al reabrir el período contable');
+    console.error('Error reopening period:', error);
+    toast.error('Error al reabrir el período');
     return false;
   }
 }
@@ -613,7 +671,7 @@ export async function getCurrentPeriod(): Promise<AccountingPeriod | null> {
   try {
     // Buscar períodos activos (no cerrados)
     const { data, error } = await supabase
-      .from('accounting_periods')
+      .from('accounting_periods_with_users')
       .select('*')
       .eq('is_closed', false)
       .order('end_date', { ascending: false })
@@ -634,7 +692,7 @@ export async function getCurrentPeriod(): Promise<AccountingPeriod | null> {
 export async function fetchFiscalYears(): Promise<{ data: FiscalYear[]; error: any }> {
   try {
     const { data, error } = await supabase
-      .from('accounting_periods')
+      .from('accounting_periods_with_users')
       .select('*')
       .eq('is_month', false)
       .order('start_date', { ascending: false });
@@ -645,7 +703,7 @@ export async function fetchFiscalYears(): Promise<{ data: FiscalYear[]; error: a
     const fiscalYearsWithMonths = await Promise.all(
       (data || []).map(async (year) => {
         const { data: monthsData, error: monthsError } = await supabase
-          .from('monthly_accounting_periods')
+          .from('monthly_accounting_periods_with_users')
           .select('*')
           .eq('fiscal_year_id', year.id)
           .order('month');
@@ -672,7 +730,7 @@ export async function fetchFiscalYears(): Promise<{ data: FiscalYear[]; error: a
 export async function getFiscalYear(id: string): Promise<{ data: FiscalYear | null; error: any }> {
   try {
     const { data, error } = await supabase
-      .from('accounting_periods')
+      .from('accounting_periods_with_users')
       .select('*')
       .eq('id', id)
       .single();
@@ -682,7 +740,7 @@ export async function getFiscalYear(id: string): Promise<{ data: FiscalYear | nu
 
     // Obtener períodos mensuales
     const { data: monthsData, error: monthsError } = await supabase
-      .from('monthly_accounting_periods')
+      .from('monthly_accounting_periods_with_users')
       .select('*')
       .eq('fiscal_year_id', id)
       .order('month');
@@ -769,604 +827,6 @@ export async function createFiscalYear(
   } catch (error: any) {
     console.error('Error al crear año fiscal:', error);
     return { data: null, error: error.message || 'Error desconocido al crear año fiscal' };
-  }
-}
-
-/**
- * Cierra un período mensual permanentemente (no puede ser reabierto)
- */
-export async function closeMonthlyPeriod(
-  periodId: string,
-  userId: string
-): Promise<{ success: boolean; error: any }> {
-  try {
-    // Verificar que el período existe y está activo
-    const { data: period, error: checkError } = await supabase
-      .from('monthly_accounting_periods')
-      .select('*')
-      .eq('id', periodId)
-      .single();
-    
-    if (checkError) throw checkError;
-    
-    if (!period) {
-      return { success: false, error: 'Período no encontrado' };
-    }
-    
-    if (period.is_closed) {
-      return { success: false, error: 'El período ya está cerrado permanentemente' };
-    }
-    
-    // Verificar que no hay asientos pendientes
-    const { count, error: pendingError } = await supabase
-      .from('journal_entries')
-      .select('id', { count: 'exact', head: true })
-      .eq('monthly_period_id', periodId)
-      .or('is_approved.eq.false,status.eq.draft');
-    
-    if (pendingError) throw pendingError;
-    
-    if (count && count > 0) {
-      return { success: false, error: 'No se puede cerrar el período. Hay asientos pendientes de aprobación.' };
-    }
-    
-    // Cerrar el período (permanentemente)
-    const { error } = await supabase
-      .from('monthly_accounting_periods')
-      .update({
-        is_closed: true,
-        is_active: false,
-        closed_at: new Date().toISOString(),
-        closed_by: userId,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', periodId);
-    
-    if (error) throw error;
-    
-    return { success: true, error: null };
-  } catch (error) {
-    console.error('Error al cerrar período mensual:', error);
-    return { success: false, error };
-  }
-}
-
-/**
- * Activa o inactiva un período mensual (pero no cerrado)
- */
-export async function toggleMonthlyPeriodActive(
-  periodId: string,
-  isActive: boolean,
-  userId: string
-): Promise<{ success: boolean; error: any }> {
-  try {
-    // Verificar que el período existe y no está cerrado
-    const { data: period, error: checkError } = await supabase
-      .from('monthly_accounting_periods')
-      .select('*')
-      .eq('id', periodId)
-      .single();
-    
-    if (checkError) throw checkError;
-    
-    if (!period) {
-      return { success: false, error: 'Período no encontrado' };
-    }
-    
-    if (period.is_closed) {
-      return { success: false, error: 'No se puede modificar un período cerrado permanentemente' };
-    }
-    
-    // Activar o inactivar el período
-    const { error } = await supabase
-      .from('monthly_accounting_periods')
-      .update({
-        is_active: isActive,
-        updated_at: new Date().toISOString(),
-        ...(isActive && {
-          is_reopened: true,
-          reopened_at: new Date().toISOString(),
-          reopened_by: userId
-        })
-      })
-      .eq('id', periodId);
-    
-    if (error) throw error;
-    
-    return { success: true, error: null };
-  } catch (error) {
-    console.error(`Error al ${isActive ? 'activar' : 'inactivar'} período mensual:`, error);
-    return { success: false, error };
-  }
-}
-
-/**
- * Reabre un período mensual
- */
-export async function reopenMonthlyPeriod(
-  periodId: string,
-  reason: string,
-  userId: string
-): Promise<{ success: boolean; error: any }> {
-  try {
-    if (!userId) {
-      throw new Error('Usuario no autenticado');
-    }
-
-    if (!reason || reason.trim() === '') {
-      throw new Error('Debe proporcionar un motivo para reabrir el período');
-    }
-
-    // Verificar que el período esté cerrado
-    const { data: period, error: periodError } = await supabase
-      .from('monthly_accounting_periods')
-      .select('is_closed, fiscal_year_id')
-      .eq('id', periodId)
-      .single();
-
-    if (periodError) throw periodError;
-
-    if (!period) {
-      throw new Error('Período no encontrado');
-    }
-
-    if (!period.is_closed) {
-      throw new Error('El período ya está abierto');
-    }
-
-    // Verificar que el año fiscal no esté cerrado
-    const { data: fiscalYear, error: fiscalYearError } = await supabase
-      .from('accounting_periods')
-      .select('is_closed')
-      .eq('id', period.fiscal_year_id)
-      .single();
-
-    if (fiscalYearError) throw fiscalYearError;
-
-    if (!fiscalYear) {
-      throw new Error('Año fiscal no encontrado');
-    }
-
-    if (fiscalYear.is_closed) {
-      throw new Error('No se puede reabrir un período de un año fiscal cerrado');
-    }
-
-    // Reabrir el período
-    const { error } = await supabase
-      .from('monthly_accounting_periods')
-      .update({
-        is_closed: false,
-        is_reopened: true,
-        reopened_at: new Date().toISOString(),
-        reopened_by: userId,
-        updated_at: new Date().toISOString(),
-        notes: `Reabierto: ${reason}`
-      })
-      .eq('id', periodId);
-
-    if (error) throw error;
-
-    return { success: true, error: null };
-  } catch (error) {
-    console.error('Error al reabrir período mensual:', error);
-    return { success: false, error };
-  }
-}
-
-/**
- * Cierra un año fiscal y todos sus períodos mensuales
- */
-export async function closeFiscalYear(
-  fiscalYearId: string,
-  userId: string
-): Promise<{ success: boolean; error: any }> {
-  try {
-    if (!userId) {
-      throw new Error('Usuario no autenticado');
-    }
-
-    // 1. Verificar que todos los períodos mensuales estén listos para cerrar
-    // (no pueden haber asientos pendientes de aprobación)
-    const { data: monthlyPeriods, error: monthsQueryError } = await supabase
-      .from('monthly_accounting_periods')
-      .select('id, name')
-      .eq('fiscal_year_id', fiscalYearId);
-      
-    if (monthsQueryError) throw monthsQueryError;
-    
-    if (!monthlyPeriods || monthlyPeriods.length === 0) {
-      return { success: false, error: 'El año fiscal no tiene períodos mensuales asociados' };
-    }
-    
-    // Verificar que no haya asientos pendientes en ninguno de los períodos
-    const monthlyPeriodIds = monthlyPeriods.map(p => p.id);
-    const { data: pendingEntries, error: pendingError } = await supabase
-      .from('journal_entries')
-      .select('id, entry_number, monthly_period_id')
-      .in('monthly_period_id', monthlyPeriodIds)
-      .or('is_approved.eq.false,status.eq.draft,status.eq.pendiente');
-      
-    if (pendingError) throw pendingError;
-    
-    if (pendingEntries && pendingEntries.length > 0) {
-      return { 
-        success: false, 
-        error: `No se puede cerrar el año fiscal porque hay ${pendingEntries.length} asientos pendientes de aprobación` 
-      };
-    }
-
-    // 2. Cerrar todos los períodos mensuales que no estén cerrados
-    const { data: openMonths, error: openMonthsError } = await supabase
-      .from('monthly_accounting_periods')
-      .select('id, name')
-      .eq('fiscal_year_id', fiscalYearId)
-      .eq('is_closed', false);
-
-    if (openMonthsError) throw openMonthsError;
-
-    if (openMonths && openMonths.length > 0) {
-      // Cerrar los períodos mensuales abiertos
-      const { error: closeMonthsError } = await supabase
-        .from('monthly_accounting_periods')
-        .update({
-          is_closed: true,
-          is_active: false,
-          closed_at: new Date().toISOString(),
-          closed_by: userId,
-          updated_at: new Date().toISOString()
-        })
-        .in('id', openMonths.map(m => m.id));
-        
-      if (closeMonthsError) {
-        throw new Error(`Error al cerrar períodos mensuales: ${closeMonthsError.message}`);
-      }
-      
-      console.log(`Cerrados ${openMonths.length} períodos mensuales del año fiscal`);
-    }
-
-    // 3. Cerrar el año fiscal
-    const { error } = await supabase
-      .from('accounting_periods')
-      .update({
-        is_closed: true,
-        is_active: false,
-        closed_at: new Date().toISOString(),
-        closed_by: userId,
-        updated_at: new Date().toISOString()
-      })
-      .eq('id', fiscalYearId);
-
-    if (error) throw error;
-    
-    console.log(`Año fiscal ${fiscalYearId} cerrado correctamente`);
-
-    return { success: true, error: null };
-  } catch (error: any) {
-    console.error('Error al cerrar año fiscal:', error);
-    return { success: false, error: error.message || 'Error desconocido al cerrar año fiscal' };
-  }
-}
-
-/**
- * Obtiene los períodos mensuales disponibles para un asiento contable
- * Prioriza los períodos del año fiscal actual que estén activos y no cerrados
- */
-export async function getAvailablePeriodsForEntry(): Promise<{ data: MonthlyPeriod[]; error: any }> {
-  try {
-    // 1. Obtener el año fiscal activo más reciente
-    const { data: fiscalYears, error: fiscalYearError } = await supabase
-      .from('accounting_periods')
-      .select('*')
-      .eq('is_closed', false)
-      .eq('is_active', true)
-      .is('is_month', false)
-      .order('end_date', { ascending: false })
-      .limit(1);
-      
-    if (fiscalYearError) throw fiscalYearError;
-    
-    // Si no hay año fiscal activo, retornar una lista vacía
-    if (!fiscalYears || fiscalYears.length === 0) {
-      return { data: [], error: 'No hay años fiscales activos disponibles' };
-    }
-    
-    const currentFiscalYear = fiscalYears[0];
-    
-    // 2. Obtener todos los períodos mensuales activos y no cerrados del año fiscal actual
-    const { data, error } = await supabase
-      .from('monthly_accounting_periods')
-      .select(`
-        *,
-        fiscal_year:fiscal_year_id (name, is_closed, is_active)
-      `)
-      .eq('fiscal_year_id', currentFiscalYear.id)
-      .eq('is_closed', false)
-      .eq('is_active', true)
-      .order('start_date', { ascending: false });
-
-    if (error) throw error;
-
-    // 3. Procesar los períodos para el formato adecuado
-    const availablePeriods = data || [];
-
-    return { 
-      data: availablePeriods.map(period => ({
-        ...period,
-        fiscal_year_id: period.fiscal_year_id,
-        fiscal_year_name: period.fiscal_year?.name,
-        // Asegurar que las fechas sean cadenas de texto adecuadas
-        start_date: period.start_date ? period.start_date.split('T')[0] : period.start_date,
-        end_date: period.end_date ? period.end_date.split('T')[0] : period.end_date
-      })), 
-      error: null 
-    };
-  } catch (error) {
-    console.error('Error al obtener períodos disponibles:', error);
-    return { data: [], error };
-  }
-}
-
-/**
- * Verifica si un período mensual está cerrado
- */
-export async function isMonthlyPeriodClosed(periodId: string): Promise<boolean> {
-  try {
-    const { data, error } = await supabase
-      .from('monthly_accounting_periods')
-      .select('is_closed, fiscal_year_id')
-      .eq('id', periodId)
-      .single();
-      
-    if (error) throw error;
-    
-    if (!data) return true; // Si no existe, considerarlo cerrado
-    
-    // Verificar también si el año fiscal está cerrado
-    if (data.is_closed) return true;
-    
-    const { data: fiscalYear, error: fiscalYearError } = await supabase
-      .from('accounting_periods')
-      .select('is_closed')
-      .eq('id', data.fiscal_year_id)
-      .single();
-      
-    if (fiscalYearError) throw fiscalYearError;
-    
-    return fiscalYear?.is_closed || false;
-  } catch (error) {
-    console.error('Error al verificar estado del período mensual:', error);
-    return true; // Por seguridad, si hay error, considerarlo cerrado
-  }
-}
-
-/**
- * Inicializa períodos mensuales para un año fiscal existente
- * Solo el período correspondiente al mes actual se establece como activo
- */
-export async function initializeMonthlyPeriodsForFiscalYear(fiscalYearId: string, userId: string): Promise<{ success: boolean, error?: any }> {
-  try {
-    // Obtener información del año fiscal
-    const { data: fiscalYear, error: fiscalYearError } = await supabase
-      .from('accounting_periods')
-      .select('*')
-      .eq('id', fiscalYearId)
-      .single();
-      
-    if (fiscalYearError) throw fiscalYearError;
-    if (!fiscalYear) throw new Error('No se encontró el año fiscal');
-    
-    // Verificar si ya existen períodos
-    const { data: existingPeriods, error: existingError } = await supabase
-      .from('monthly_accounting_periods')
-      .select('id')
-      .eq('fiscal_year_id', fiscalYearId);
-      
-    if (existingError) throw existingError;
-    
-    // Si existen períodos, eliminarlos para regenerarlos
-    if (existingPeriods && existingPeriods.length > 0) {
-      const { error: deleteError } = await supabase
-        .from('monthly_accounting_periods')
-        .delete()
-        .in('id', existingPeriods.map(p => p.id));
-        
-      if (deleteError) throw deleteError;
-      
-      console.log(`Eliminados ${existingPeriods.length} períodos mensuales existentes`);
-    }
-    
-    // Generar períodos mensuales
-    const startDate = new Date(fiscalYear.start_date);
-    const endDate = new Date(fiscalYear.end_date);
-    const periods = [];
-    
-    // Obtener mes y año actual para activar solo el período correspondiente
-    const currentDate = new Date();
-    const currentYear = currentDate.getFullYear();
-    const currentMonth = currentDate.getMonth() + 1; // 1-12
-    
-    // Crear un período para cada mes en el rango
-    let currentDate2 = new Date(startDate);
-    while (currentDate2 <= endDate) {
-      const year = currentDate2.getFullYear();
-      const month = currentDate2.getMonth() + 1; // 1-12
-      
-      // Calcular el primer día del mes
-      const firstDay = new Date(year, month - 1, 1);
-      
-      // Calcular el último día del mes
-      const lastDay = new Date(year, month, 0);
-      
-      // Crear nombre del período (ej: "Enero 2025")
-      const monthNames = [
-        'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
-      ];
-      const periodName = `${monthNames[month - 1]} ${year}`;
-      
-      // Determinar si este período debe estar activo
-      const isActive = (year === currentYear && month === currentMonth) && fiscalYear.is_active;
-      
-      periods.push({
-        fiscal_year_id: fiscalYearId,
-        month,
-        year,
-        name: periodName,
-        start_date: firstDay.toISOString().split('T')[0],
-        end_date: lastDay.toISOString().split('T')[0],
-        is_closed: false,
-        is_active: isActive,
-        created_by: userId,
-        created_at: new Date().toISOString()
-      });
-      
-      // Avanzar al siguiente mes
-      currentDate2.setMonth(currentDate2.getMonth() + 1);
-    }
-    
-    // Insertar los períodos mensuales en la base de datos
-    if (periods.length > 0) {
-      const { error } = await supabase
-        .from('monthly_accounting_periods')
-        .insert(periods);
-        
-      if (error) throw error;
-      
-      console.log(`Creados ${periods.length} períodos mensuales para el año fiscal ${fiscalYear.name}`);
-      console.log(`Período activo: ${periods.find(p => p.is_active)?.name || 'Ninguno'}`);
-    }
-    
-    return { success: true };
-  } catch (error: any) {
-    console.error('Error al inicializar períodos mensuales:', error);
-    return { success: false, error: error.message || 'Error al inicializar períodos mensuales' };
-  }
-}
-
-/**
- * Reabre un año fiscal y todos sus períodos mensuales
- * Esta operación solo es posible si el año fiscal fue cerrado previamente
- * y no hay otro año fiscal activo para el mismo período
- */
-export async function reopenFiscalYear(
-  fiscalYearId: string,
-  userId: string,
-  reason: string
-): Promise<{ success: boolean; error: any }> {
-  try {
-    if (!userId) {
-      throw new Error('Usuario no autenticado');
-    }
-    
-    if (!reason || reason.trim() === '') {
-      throw new Error('Debe proporcionar un motivo para reabrir el año fiscal');
-    }
-
-    // 1. Verificar que el año fiscal existe y está cerrado
-    const { data: fiscalYear, error: yearError } = await supabase
-      .from('accounting_periods')
-      .select('*')
-      .eq('id', fiscalYearId)
-      .single();
-      
-    if (yearError) throw yearError;
-    
-    if (!fiscalYear) {
-      return { success: false, error: 'Año fiscal no encontrado' };
-    }
-    
-    if (!fiscalYear.is_closed) {
-      return { success: false, error: 'Este año fiscal ya está abierto' };
-    }
-    
-    // 2. Verificar que no haya otro año fiscal activo para el mismo período
-    const { data: overlappingYears, error: overlapError } = await supabase
-      .from('accounting_periods')
-      .select('id, name')
-      .neq('id', fiscalYearId)
-      .eq('is_closed', false)
-      .or(`start_date.lte.${fiscalYear.end_date},end_date.gte.${fiscalYear.start_date}`)
-      .is('is_month', false);
-      
-    if (overlapError) throw overlapError;
-    
-    if (overlappingYears && overlappingYears.length > 0) {
-      const yearNames = overlappingYears.map(y => y.name).join(', ');
-      return { 
-        success: false, 
-        error: `No se puede reabrir el año fiscal porque hay otros años fiscales activos en el mismo período: ${yearNames}` 
-      };
-    }
-    
-    // 3. Reabrir el año fiscal
-    const { error: updateError } = await supabase
-      .from('accounting_periods')
-      .update({
-        is_closed: false,
-        is_active: true,
-        is_reopened: true,
-        reopened_at: new Date().toISOString(),
-        reopened_by: userId,
-        closed_at: null,
-        closed_by: null,
-        updated_at: new Date().toISOString(),
-        notes: fiscalYear.notes 
-          ? `${fiscalYear.notes} | Reabierto: ${reason}` 
-          : `Reabierto: ${reason}`
-      })
-      .eq('id', fiscalYearId);
-      
-    if (updateError) throw updateError;
-    
-    // 4. Reabrir los períodos mensuales
-    const { data: monthlyPeriods, error: monthsError } = await supabase
-      .from('monthly_accounting_periods')
-      .select('id')
-      .eq('fiscal_year_id', fiscalYearId);
-      
-    if (monthsError) throw monthsError;
-    
-    if (monthlyPeriods && monthlyPeriods.length > 0) {
-      // Reabrir todos los períodos mensuales
-      const { error: reopenMonthsError } = await supabase
-        .from('monthly_accounting_periods')
-        .update({
-          is_closed: false,
-          is_active: true,
-          is_reopened: true,
-          reopened_at: new Date().toISOString(),
-          reopened_by: userId,
-          closed_at: null,
-          closed_by: null,
-          updated_at: new Date().toISOString()
-        })
-        .in('id', monthlyPeriods.map(p => p.id));
-        
-      if (reopenMonthsError) {
-        // Si hubo error al reabrir los meses, volver a cerrar el año fiscal
-        await supabase
-          .from('accounting_periods')
-          .update({
-            is_closed: true,
-            is_active: false,
-            closed_at: new Date().toISOString(),
-            closed_by: userId,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', fiscalYearId);
-          
-        throw new Error(`Error al reabrir períodos mensuales: ${reopenMonthsError.message}`);
-      }
-      
-      console.log(`Reabiertos ${monthlyPeriods.length} períodos mensuales del año fiscal`);
-    }
-    
-    console.log(`Año fiscal ${fiscalYear.name} reabierto correctamente`);
-    
-    return { success: true, error: null };
-  } catch (error: any) {
-    console.error('Error al reabrir año fiscal:', error);
-    return { success: false, error: error.message || 'Error desconocido al reabrir año fiscal' };
   }
 }
 
@@ -1574,5 +1034,528 @@ export async function toggleFiscalYearActive(
   } catch (error: any) {
     console.error(`Error al ${isActive ? 'activar' : 'desactivar'} año fiscal:`, error);
     return { success: false, error: error.message || `Error desconocido al ${isActive ? 'activar' : 'desactivar'} año fiscal` };
+  }
+}
+
+/**
+ * Obtiene todos los períodos mensuales
+ */
+export async function fetchAllMonthlyPeriods(): Promise<MonthlyPeriod[]> {
+  try {
+    const { data, error } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('*')
+      .order('year', { ascending: false })
+      .order('month', { ascending: true });
+
+    if (error) throw error;
+    return data || [];
+  } catch (error) {
+    console.error('Error fetching monthly periods:', error);
+    toast.error('Error al cargar los períodos mensuales');
+    return [];
+  }
+}
+
+/**
+ * Obtiene un período mensual específico por ID
+ */
+export async function getMonthlyPeriodById(id: string): Promise<MonthlyPeriod | null> {
+  try {
+    const { data, error } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error) throw error;
+    return data;
+  } catch (error) {
+    console.error('Error fetching monthly period:', error);
+    return null;
+  }
+}
+
+/**
+ * Obtiene los períodos mensuales de un año fiscal
+ */
+export async function getMonthlyPeriodsForFiscalYear(fiscalYearId: string): Promise<MonthlyPeriod[]> {
+  try {
+    const { data, error } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('*')
+      .eq('fiscal_year_id', fiscalYearId)
+      .order('month');
+
+    if (error) throw error;
+    return data || [];
+  } catch (error) {
+    console.error('Error fetching monthly periods for fiscal year:', error);
+    toast.error('Error al cargar los períodos mensuales del año fiscal');
+    return [];
+  }
+}
+
+/**
+ * Activa o inactiva un período mensual (pero no cerrado)
+ */
+export async function toggleMonthlyPeriodActive(
+  periodId: string,
+  isActive: boolean,
+  userId: string
+): Promise<{ success: boolean; error: any }> {
+  try {
+    // Verificar que el período existe y no está cerrado
+    const { data: period, error: checkError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('*')
+      .eq('id', periodId)
+      .single();
+    
+    if (checkError) throw checkError;
+    
+    if (!period) {
+      return { success: false, error: 'Período no encontrado' };
+    }
+    
+    if (period.is_closed) {
+      return { success: false, error: 'No se puede modificar un período cerrado permanentemente' };
+    }
+    
+    // Activar o inactivar el período
+    const { error } = await supabase
+      .from('monthly_accounting_periods')
+      .update({
+        is_active: isActive,
+        updated_at: new Date().toISOString(),
+        ...(isActive && {
+          is_reopened: true,
+          reopened_at: new Date().toISOString(),
+          reopened_by: userId
+        })
+      })
+      .eq('id', periodId);
+    
+    if (error) throw error;
+    
+    return { success: true, error: null };
+  } catch (error) {
+    console.error(`Error al ${isActive ? 'activar' : 'inactivar'} período mensual:`, error);
+    return { success: false, error };
+  }
+}
+
+/**
+ * Cierra un año fiscal y todos sus períodos mensuales
+ */
+export async function closeFiscalYear(
+  fiscalYearId: string,
+  userId: string
+): Promise<{ success: boolean; error: any }> {
+  try {
+    if (!userId) {
+      throw new Error('Usuario no autenticado');
+    }
+
+    // 1. Verificar que el año fiscal existe y está activo
+    const { data: fiscalYear, error: yearError } = await supabase
+      .from('accounting_periods_with_users')
+      .select('*')
+      .eq('id', fiscalYearId)
+      .single();
+      
+    if (yearError) throw yearError;
+    
+    if (!fiscalYear) {
+      return { success: false, error: 'Año fiscal no encontrado' };
+    }
+    
+    if (fiscalYear.is_closed) {
+      return { success: false, error: 'Este año fiscal ya está cerrado' };
+    }
+
+    // 2. Verificar que todos los períodos mensuales estén listos para cerrar
+    const { data: monthlyPeriods, error: monthsQueryError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('id, name')
+      .eq('fiscal_year_id', fiscalYearId);
+      
+    if (monthsQueryError) throw monthsQueryError;
+    
+    if (!monthlyPeriods || monthlyPeriods.length === 0) {
+      return { success: false, error: 'El año fiscal no tiene períodos mensuales asociados' };
+    }
+    
+    // Verificar que no haya asientos pendientes en ninguno de los períodos
+    const monthlyPeriodIds = monthlyPeriods.map(p => p.id);
+    const { data: pendingEntries, error: pendingError } = await supabase
+      .from('journal_entries')
+      .select('id, entry_number, monthly_period_id')
+      .in('monthly_period_id', monthlyPeriodIds)
+      .or('is_approved.eq.false,status.eq.draft,status.eq.pendiente');
+      
+    if (pendingError) throw pendingError;
+    
+    if (pendingEntries && pendingEntries.length > 0) {
+      return { 
+        success: false, 
+        error: `No se puede cerrar el año fiscal porque hay ${pendingEntries.length} asientos pendientes de aprobación` 
+      };
+    }
+
+    // 3. Cerrar todos los períodos mensuales que no estén cerrados
+    const { data: openMonths, error: openMonthsError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('id, name')
+      .eq('fiscal_year_id', fiscalYearId)
+      .eq('is_closed', false);
+
+    if (openMonthsError) throw openMonthsError;
+
+    if (openMonths && openMonths.length > 0) {
+      // Cerrar los períodos mensuales abiertos
+      const { error: closeMonthsError } = await supabase
+        .from('monthly_accounting_periods')
+        .update({
+          is_closed: true,
+          is_active: false,
+          closed_at: new Date().toISOString(),
+          closed_by: userId,
+          updated_at: new Date().toISOString()
+        })
+        .in('id', openMonths.map(m => m.id));
+        
+      if (closeMonthsError) {
+        throw new Error(`Error al cerrar períodos mensuales: ${closeMonthsError.message}`);
+      }
+      
+      console.log(`Cerrados ${openMonths.length} períodos mensuales del año fiscal`);
+    }
+
+    // 4. Cerrar el año fiscal
+    const { error } = await supabase
+      .from('accounting_periods')
+      .update({
+        is_closed: true,
+        is_active: false,
+        closed_at: new Date().toISOString(),
+        closed_by: userId,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', fiscalYearId);
+
+    if (error) throw error;
+    
+    console.log(`Año fiscal ${fiscalYear.name} cerrado correctamente`);
+
+    return { success: true, error: null };
+  } catch (error: any) {
+    console.error('Error al cerrar año fiscal:', error);
+    return { success: false, error: error.message || 'Error desconocido al cerrar año fiscal' };
+  }
+}
+
+/**
+ * Reabre un año fiscal y todos sus períodos mensuales
+ * Esta operación solo es posible si el año fiscal fue cerrado previamente
+ * y no hay otro año fiscal activo para el mismo período
+ */
+export async function reopenFiscalYear(
+  fiscalYearId: string,
+  userId: string,
+  reason: string
+): Promise<{ success: boolean; error: any }> {
+  try {
+    if (!userId) {
+      throw new Error('Usuario no autenticado');
+    }
+    
+    if (!reason || reason.trim() === '') {
+      throw new Error('Debe proporcionar un motivo para reabrir el año fiscal');
+    }
+
+    // 1. Verificar que el año fiscal existe y está cerrado
+    const { data: fiscalYear, error: yearError } = await supabase
+      .from('accounting_periods_with_users')
+      .select('*')
+      .eq('id', fiscalYearId)
+      .single();
+      
+    if (yearError) throw yearError;
+    
+    if (!fiscalYear) {
+      return { success: false, error: 'Año fiscal no encontrado' };
+    }
+    
+    // 2. Verificar que no haya otro año fiscal activo para el mismo período
+    const { data: overlappingYears, error: overlapError } = await supabase
+      .from('accounting_periods_with_users')
+      .select('id, name')
+      .neq('id', fiscalYearId)
+      .eq('is_closed', false)
+      .or(`start_date.lte.${fiscalYear.end_date},end_date.gte.${fiscalYear.start_date}`)
+      .is('is_month', false);
+      
+    if (overlapError) throw overlapError;
+    
+    if (overlappingYears && overlappingYears.length > 0) {
+      const yearNames = overlappingYears.map(y => y.name).join(', ');
+      return { 
+        success: false, 
+        error: `No se puede reabrir el año fiscal porque hay otros años fiscales activos en el mismo período: ${yearNames}` 
+      };
+    }
+    
+    // 3. Reabrir el año fiscal
+    const { error: updateError } = await supabase
+      .from('accounting_periods')
+      .update({
+        is_closed: false,
+        is_active: true,
+        is_reopened: true,
+        reopened_at: new Date().toISOString(),
+        reopened_by: userId,
+        closed_at: null,
+        closed_by: null,
+        updated_at: new Date().toISOString(),
+        notes: fiscalYear.notes 
+          ? `${fiscalYear.notes} | Reabierto: ${reason}` 
+          : `Reabierto: ${reason}`
+      })
+      .eq('id', fiscalYearId);
+      
+    if (updateError) throw updateError;
+    
+    // 4. Reabrir los períodos mensuales
+    const { data: monthlyPeriods, error: monthsError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('id')
+      .eq('fiscal_year_id', fiscalYearId);
+      
+    if (monthsError) throw monthsError;
+    
+    if (monthlyPeriods && monthlyPeriods.length > 0) {
+      // Reabrir todos los períodos mensuales
+      const { error: reopenMonthsError } = await supabase
+        .from('monthly_accounting_periods')
+        .update({
+          is_closed: false,
+          is_active: true,
+          is_reopened: true,
+          reopened_at: new Date().toISOString(),
+          reopened_by: userId,
+          closed_at: null,
+          closed_by: null,
+          updated_at: new Date().toISOString()
+        })
+        .in('id', monthlyPeriods.map(p => p.id));
+        
+      if (reopenMonthsError) {
+        // Si hubo error al reabrir los meses, volver a cerrar el año fiscal
+        await supabase
+          .from('accounting_periods')
+          .update({
+            is_closed: true,
+            is_active: false,
+            closed_at: new Date().toISOString(),
+            closed_by: userId,
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', fiscalYearId);
+          
+        throw new Error(`Error al reabrir períodos mensuales: ${reopenMonthsError.message}`);
+      }
+      
+      console.log(`Reabiertos ${monthlyPeriods.length} períodos mensuales del año fiscal`);
+    }
+    
+    console.log(`Año fiscal ${fiscalYear.name} reabierto correctamente`);
+    
+    return { success: true, error: null };
+  } catch (error: any) {
+    console.error('Error al reabrir año fiscal:', error);
+    return { success: false, error: error.message || 'Error desconocido al reabrir año fiscal' };
+  }
+}
+
+/**
+ * Inicializa períodos mensuales para un año fiscal existente
+ * Solo el período correspondiente al mes actual se establece como activo
+ */
+export async function initializeMonthlyPeriodsForFiscalYear(
+  fiscalYearId: string,
+  userId: string
+): Promise<{ success: boolean, error?: any }> {
+  try {
+    // Obtener información del año fiscal
+    const { data: fiscalYear, error: fiscalYearError } = await supabase
+      .from('accounting_periods_with_users')
+      .select('*')
+      .eq('id', fiscalYearId)
+      .single();
+      
+    if (fiscalYearError) throw fiscalYearError;
+    if (!fiscalYear) throw new Error('No se encontró el año fiscal');
+    
+    // Verificar si ya existen períodos
+    const { data: existingPeriods, error: existingError } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('id')
+      .eq('fiscal_year_id', fiscalYearId);
+      
+    if (existingError) throw existingError;
+    
+    // Si existen períodos, eliminarlos para regenerarlos
+    if (existingPeriods && existingPeriods.length > 0) {
+      const { error: deleteError } = await supabase
+        .from('monthly_accounting_periods')
+        .delete()
+        .in('id', existingPeriods.map(p => p.id));
+        
+      if (deleteError) throw deleteError;
+      
+      console.log(`Eliminados ${existingPeriods.length} períodos mensuales existentes`);
+    }
+    
+    // Generar períodos mensuales
+    const startDate = new Date(fiscalYear.start_date);
+    const endDate = new Date(fiscalYear.end_date);
+    const periods = [];
+    
+    // Obtener mes y año actual para activar solo el período correspondiente
+    const currentDate = new Date();
+    const currentYear = currentDate.getFullYear();
+    const currentMonth = currentDate.getMonth() + 1; // 1-12
+    
+    // Crear un período para cada mes en el rango
+    let currentDate2 = new Date(startDate);
+    while (currentDate2 <= endDate) {
+      const year = currentDate2.getFullYear();
+      const month = currentDate2.getMonth() + 1; // 1-12
+      
+      // Calcular el primer día del mes
+      const firstDay = new Date(year, month - 1, 1);
+      
+      // Calcular el último día del mes
+      const lastDay = new Date(year, month, 0);
+      
+      // Crear nombre del período (ej: "Enero 2025")
+      const monthNames = [
+        'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+      ];
+      const periodName = `${monthNames[month - 1]} ${year}`;
+      
+      // Determinar si este período debe estar activo
+      const isActive = (year === currentYear && month === currentMonth) && fiscalYear.is_active;
+      
+      periods.push({
+        fiscal_year_id: fiscalYearId,
+        month,
+        year,
+        name: periodName,
+        start_date: firstDay.toISOString().split('T')[0],
+        end_date: lastDay.toISOString().split('T')[0],
+        is_closed: false,
+        is_active: isActive,
+        created_by: userId,
+        created_at: new Date().toISOString()
+      });
+      
+      // Avanzar al siguiente mes
+      currentDate2.setMonth(currentDate2.getMonth() + 1);
+    }
+    
+    // Insertar los períodos mensuales en la base de datos
+    if (periods.length > 0) {
+      const { error } = await supabase
+        .from('monthly_accounting_periods')
+        .insert(periods);
+        
+      if (error) throw error;
+      
+      console.log(`Creados ${periods.length} períodos mensuales para el año fiscal ${fiscalYear.name}`);
+      console.log(`Período activo: ${periods.find(p => p.is_active)?.name || 'Ninguno'}`);
+    }
+    
+    return { success: true };
+  } catch (error: any) {
+    console.error('Error al inicializar períodos mensuales:', error);
+    return { success: false, error: error.message || 'Error al inicializar períodos mensuales' };
+  }
+}
+
+/**
+ * Verifica si un período mensual está cerrado
+ */
+export async function isMonthlyPeriodClosed(periodId: string): Promise<boolean> {
+  try {
+    const { data, error } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select('is_closed, fiscal_year_id')
+      .eq('id', periodId)
+      .single();
+      
+    if (error) throw error;
+    
+    if (!data) return true; // Si no existe, considerarlo cerrado
+    
+    // Verificar también si el año fiscal está cerrado
+    if (data.is_closed) return true;
+    
+    const { data: fiscalYear, error: fiscalYearError } = await supabase
+      .from('accounting_periods_with_users')
+      .select('is_closed')
+      .eq('id', data.fiscal_year_id)
+      .single();
+      
+    if (fiscalYearError) throw fiscalYearError;
+    
+    return fiscalYear?.is_closed || false;
+  } catch (error) {
+    console.error('Error al verificar estado del período mensual:', error);
+    return true; // Por seguridad, si hay error, considerarlo cerrado
+  }
+}
+
+/**
+ * Obtiene los períodos mensuales disponibles para registrar asientos contables
+ * Solo retorna períodos que:
+ * 1. No están cerrados
+ * 2. Están activos
+ * 3. Pertenecen a un año fiscal activo y no cerrado
+ */
+export async function getAvailablePeriodsForEntry(): Promise<{ data: MonthlyPeriod[]; error: any }> {
+  try {
+    const { data, error } = await supabase
+      .from('monthly_accounting_periods_with_users')
+      .select(`
+        *,
+        fiscal_year:fiscal_year_id(
+          id,
+          name,
+          is_closed,
+          is_active
+        )
+      `)
+      .eq('is_closed', false)
+      .eq('is_active', true)
+      .order('year', { ascending: false })
+      .order('month', { ascending: true });
+
+    if (error) throw error;
+
+    // Filtrar solo los períodos cuyo año fiscal está activo y no cerrado
+    const filteredData = (data || []).filter(period => 
+      period.fiscal_year && 
+      !period.fiscal_year.is_closed && 
+      period.fiscal_year.is_active
+    );
+    
+    return { data: filteredData, error: null };
+  } catch (error) {
+    console.error('Error al obtener períodos disponibles:', error);
+    toast.error('Error al cargar los períodos disponibles');
+    return { data: [], error };
   }
 }

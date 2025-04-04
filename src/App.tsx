@@ -14,7 +14,6 @@ import { AuthProvider } from './contexts/AuthContext';
 import 'react-toastify/dist/ReactToastify.css';
 import { TrialBalance } from './pages/TrialBalance';
 import { FinancialStatements } from './pages/FinancialStatements';
-import { Adjustments } from './pages/Adjustments';
 import { ClosingProcess } from './pages/ClosingProcess';
 import { PeriodReopening } from './pages/PeriodReopening';
 import { FinancialAnalysis } from "./pages/FinancialAnalysis";
@@ -68,7 +67,6 @@ function App() {
             <Route path="balance" element={<Navigate to="/trial-balance" />} />
             <Route path="trial-balance" element={<TrialBalance />} />
             <Route path="financial-statements" element={<FinancialStatements />} />
-            <Route path="adjustments" element={<Adjustments />} />
             <Route path="closing-process" element={<ClosingProcess />} />
             <Route path="period-reopening" element={<PeriodReopening />} />
             <Route path="financial-analysis" element={<FinancialAnalysis />} />

@@ -5,6 +5,18 @@ import { isValid, format, parseISO } from 'date-fns';
 import { isMonthlyPeriodClosed } from './accountingPeriodService';
 import { v4 as uuidv4 } from 'uuid';
 
+// Tipos de Ajuste Contable
+export type AdjustmentType = 
+  | 'depreciation' 
+  | 'amortization' 
+  | 'accrual' // Devengo (gasto o ingreso)
+  | 'deferred' // Diferido (gasto o ingreso)
+  | 'inventory' 
+  | 'correction' 
+  | 'provision' // Provisiones
+  | 'valuation' // Ajustes de valoración
+  | 'other';
+
 // Interfaces
 export interface JournalEntry {
   id: string;
@@ -29,6 +41,11 @@ export interface JournalEntry {
   approved_by?: string;
   reference_number?: string;
   reference_date?: string;
+  // Campos de Ajuste
+  is_adjustment: boolean; // <- Nuevo campo
+  adjustment_type?: AdjustmentType | null; // <- Nuevo campo
+  adjusted_entry_id?: string | null; // <- Nuevo campo
+  // Relaciones
   accounting_period?: {
     id: string;
     name: string;
@@ -57,9 +74,9 @@ export interface JournalEntryItem {
   is_debit?: boolean;
   amount?: number;
   account?: {
-  id: string;
+    id: string;
     code: string;
-  name: string;
+    name: string;
     type: string;
     nature: string;
   };
@@ -73,6 +90,20 @@ export interface JournalEntryForm {
   notes?: string;
   reference_number?: string;
   reference_date?: string;
+  // Campos de Ajuste
+  is_adjustment?: boolean;
+  adjustment_type?: AdjustmentType | null;
+  adjusted_entry_id?: string | null;
+}
+
+export interface JournalEntriesFilter {
+  monthlyPeriodId?: string;
+  fiscalYearId?: string;
+  status?: string;
+  searchTerm?: string;
+  sortField?: string;
+  sortOrder?: 'asc' | 'desc';
+  entryType?: 'regular' | 'adjustment' | 'all'; // <- Nuevo filtro
 }
 
 /**
@@ -87,8 +118,26 @@ function roundAmount(amount: number | string | Decimal | null | undefined): numb
  * Valida si un asiento contable está balanceado
  */
 export function validateBalance(items: JournalEntryItem[]): { valid: boolean; message: string } {
+  // Si no hay líneas, no está balanceado
+  if (!items || items.length === 0) {
+    return { 
+      valid: false, 
+      message: 'El asiento debe tener al menos una línea' 
+    };
+  }
+  
+  // El asiento debe tener al menos 2 líneas (débito y crédito)
+  if (items.length < 2) {
+    return { 
+      valid: false, 
+      message: 'El asiento debe tener al menos una línea de débito y una de crédito' 
+    };
+  }
+  
   let totalDebit = new Decimal(0);
   let totalCredit = new Decimal(0);
+  let hasDebit = false;
+  let hasCredit = false;
   
   // Verificar que todas las líneas tengan campos obligatorios
   for (const item of items) {
@@ -97,40 +146,58 @@ export function validateBalance(items: JournalEntryItem[]): { valid: boolean; me
     }
     
     // Verificar que haya un monto
-    const hasAmount = (item.amount !== undefined && item.amount !== null) || 
-                     (item.debit !== undefined && item.debit !== null) || 
-                     (item.credit !== undefined && item.credit !== null);
+    const hasAmount = (item.amount !== undefined && item.amount !== null && item.amount > 0) || 
+                     (item.debit !== undefined && item.debit !== null && item.debit > 0) || 
+                     (item.credit !== undefined && item.credit !== null && item.credit > 0);
                      
     if (!hasAmount) {
-      return { valid: false, message: 'Todas las líneas deben tener un monto' };
+      return { valid: false, message: 'Todas las líneas deben tener un monto mayor que cero' };
     }
     
     // Sumar el debe y el haber
     if (item.is_debit && item.amount) {
       totalDebit = totalDebit.plus(new Decimal(item.amount));
+      hasDebit = true;
     } 
     else if (!item.is_debit && item.amount) {
       totalCredit = totalCredit.plus(new Decimal(item.amount));
+      hasCredit = true;
     }
     else {
       if (item.debit) {
         totalDebit = totalDebit.plus(new Decimal(item.debit));
+        hasDebit = true;
       }
       if (item.credit) {
         totalCredit = totalCredit.plus(new Decimal(item.credit));
+        hasCredit = true;
       }
     }
+  }
+  
+  // Debe haber al menos una línea de débito y una de crédito
+  if (!hasDebit || !hasCredit) {
+    return { 
+      valid: false, 
+      message: 'El asiento debe tener al menos una línea de débito y una de crédito' 
+    };
   }
   
   totalDebit = totalDebit.toDecimalPlaces(2);
   totalCredit = totalCredit.toDecimalPlaces(2);
   
-  const isBalanced = totalDebit.minus(totalCredit).abs().lessThanOrEqualTo(new Decimal(0.01));
+  const difference = totalDebit.minus(totalCredit).abs();
+  const isBalanced = difference.lessThanOrEqualTo(new Decimal(0.01));
   
-  return { 
-    valid: isBalanced,
-    message: isBalanced ? 'Asiento balanceado' : 'El asiento no está balanceado. El debe y el haber deben ser iguales.'
-  };
+  if (isBalanced) {
+    return { valid: true, message: 'Asiento balanceado' };
+  } else {
+    const formattedDifference = difference.toFixed(2);
+    return { 
+      valid: false, 
+      message: `El asiento no está balanceado. Diferencia: ${formattedDifference}. El debe y el haber deben ser iguales.`
+    };
+  }
 }
 
 /**
@@ -186,189 +253,120 @@ export async function validateDateInPeriod(date: string, periodId: string): Prom
 }
 
 /**
- * Genera un número secuencial para el asiento contable
+ * Obtener listado de asientos contables con filtros
  */
-async function generateEntryNumber(periodId: string): Promise<string> {
+export async function fetchJournalEntries(filters: JournalEntriesFilter = {}): Promise<{ data: JournalEntry[]; error: any }> {
   try {
-    if (!periodId) {
-      throw new Error('Se requiere ID del período contable para generar número de asiento');
-    }
+    console.log('Iniciando fetchJournalEntries con filtros:', filters);
     
-    console.log('Generando número de asiento para el período:', periodId);
-    
-    // Usar la fecha actual en lugar de la fecha del período
-    const currentDate = new Date();
-    const year = currentDate.getFullYear();
-    const month = String(currentDate.getMonth() + 1).padStart(2, '0');
-    const yearMonth = `${year}${month}`;
-    
-    console.log('Año-Mes actual:', yearMonth);
-    
-    // Consultar el último número con el mismo prefijo de año-mes
-    const prefix = `A-${yearMonth}`;
-    
-    const { data, error } = await supabase
+    let query = supabase
       .from('journal_entries')
-      .select('entry_number')
-      .like('entry_number', `${prefix}-%`)
-      .order('entry_number', { ascending: false })
-      .limit(1);
-      
-    if (error) {
-      console.error('Error al consultar último número de asiento:', error);
-      throw error;
+      .select(`
+        *, 
+        is_adjustment, 
+        adjustment_type, 
+        adjusted_entry_id, 
+        monthly_period:monthly_accounting_periods(id, name, fiscal_year_id, start_date, end_date, is_closed),
+        accounting_period:accounting_periods(id, name, start_date, end_date, is_closed)
+      `);
+    
+    // Aplicar filtros
+    if (filters.monthlyPeriodId) {
+      console.log('Filtrando por período mensual:', filters.monthlyPeriodId);
+      query = query.eq('monthly_period_id', filters.monthlyPeriodId);
     }
     
-    console.log('Último número de asiento encontrado:', data);
-    
-    let nextNumber = 1;
-    
-    if (data && data.length > 0 && data[0].entry_number) {
-      const parts = data[0].entry_number.split('-');
-      if (parts.length > 2) {
-        const lastNumber = parseInt(parts[2], 10);
-        if (!isNaN(lastNumber)) {
-          nextNumber = lastNumber + 1;
+    // Filtro por año fiscal - usar otro enfoque
+    if (filters.fiscalYearId) {
+      console.log('Filtrando por año fiscal:', filters.fiscalYearId);
+      try {
+        // Primero, obtener los ids de los períodos mensuales de este año fiscal
+        const { data: periodIds, error: periodsError } = await supabase
+          .from('monthly_accounting_periods')
+          .select('id')
+          .eq('fiscal_year_id', filters.fiscalYearId);
+        
+        if (periodsError) {
+          console.error('Error al obtener períodos para año fiscal:', periodsError);
+          throw periodsError;
         }
+        
+        if (periodIds && periodIds.length > 0) {
+          // Usar in() para filtrar por múltiples IDs
+          const ids = periodIds.map(p => p.id);
+          console.log(`Encontrados ${ids.length} períodos para el año fiscal`);
+          query = query.in('monthly_period_id', ids);
+        } else {
+          console.warn('No se encontraron períodos mensuales para el año fiscal:', filters.fiscalYearId);
+          // Si no hay períodos mensuales, forzar resultado vacío con un ID que no existirá
+          return { data: [], error: null };
+        }
+      } catch (e) {
+        console.error('Error crítico obteniendo períodos para filtrar por año fiscal:', e);
+        // Si hay error al obtener períodos, retornar un array vacío
+        return { data: [], error: e };
       }
     }
     
-    // Formatear el número con ceros a la izquierda (3 dígitos)
-    const formattedNumber = nextNumber.toString().padStart(3, '0');
+    // Filtro por estado del asiento
+    if (filters.status && filters.status !== 'all') {
+      console.log('Filtrando por estado:', filters.status);
+      query = query.eq('status', filters.status);
+    }
+
+    // Filtro por tipo de asiento (regular o ajuste)
+    if (filters.entryType && filters.entryType !== 'all') {
+      const isAdjustment = filters.entryType === 'adjustment';
+      console.log(`Filtrando por tipo de asiento: ${filters.entryType} (is_adjustment=${isAdjustment})`);
+      query = query.eq('is_adjustment', isAdjustment);
+    }
     
-    // Formato A-YYYYMM-NNN
-    const entryNumber = `A-${yearMonth}-${formattedNumber}`;
-    console.log('Número de asiento generado:', entryNumber);
+    // Búsqueda de texto
+    if (filters.searchTerm) {
+      const searchTerm = `%${filters.searchTerm}%`;
+      console.log('Aplicando término de búsqueda:', filters.searchTerm);
+      query = query.or(
+        `entry_number.ilike.${searchTerm},description.ilike.${searchTerm},reference_number.ilike.${searchTerm}`
+      );
+    }
     
-    return entryNumber;
-  } catch (error) {
-    console.error('Error al generar número de asiento:', error);
-    // En caso de error, usar timestamp como fallback
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const timestamp = now.getTime();
-    const fallbackNumber = `A-${year}${month}-${timestamp.toString().slice(-3)}`;
-    console.log('Usando número de asiento de respaldo:', fallbackNumber);
-    return fallbackNumber;
-  }
-}
-
-/**
- * Obtener los asientos contables con opcional filtrado
- */
-export async function fetchJournalEntries({
-  periodId,
-  monthlyPeriodId,
-  fiscalYearId,
-  startDate,
-  endDate,
-  status,
-  searchTerm,
-  sortField = 'date',
-  sortOrder = 'desc'
-}: {
-  periodId?: string;
-  monthlyPeriodId?: string;
-  fiscalYearId?: string;
-  startDate?: string;
-  endDate?: string;
-  status?: string;
-  searchTerm?: string;
-  sortField?: string;
-  sortOrder?: 'asc' | 'desc';
-}): Promise<{ data: JournalEntry[]; error: any }> {
-  try {
-    // Primero obtener los asientos contables básicos
-    let query = supabase
-      .from('journal_entries')
-      .select('*');
-
-    // Aplicar filtros
-    if (periodId) {
-      query = query.eq('accounting_period_id', periodId);
-    }
-
-    if (monthlyPeriodId) {
-      query = query.eq('monthly_period_id', monthlyPeriodId);
-    }
-
-    if (fiscalYearId) {
-      query = query.eq('accounting_period_id', fiscalYearId);
-    }
-
-    if (startDate) {
-      query = query.gte('date', startDate);
-    }
-
-    if (endDate) {
-      query = query.lte('date', endDate);
-    }
-
-    if (status) {
-      query = query.eq('status', status);
-    }
-
-    if (searchTerm) {
-      query = query.or(`description.ilike.%${searchTerm}%,entry_number.ilike.%${searchTerm}%,reference_number.ilike.%${searchTerm}%`);
-    }
-
-    // Ordenar resultados
-    query = query.order(sortField, { ascending: sortOrder === 'asc' });
+    // Aplicar orden
+    const sortField = filters.sortField || 'date';
+    const sortOrder = filters.sortOrder || 'desc';
     
+    // Validar que sortField sea una columna válida para evitar errores SQL
+    const validSortFields = ['entry_number', 'date', 'description', 'total_debit', 'total_credit', 'status', 'created_at'];
+    if (validSortFields.includes(sortField)) {
+      console.log(`Ordenando por ${sortField} en orden ${sortOrder}`);
+      query = query.order(sortField, { ascending: sortOrder === 'asc' });
+    } else {
+      console.log(`Campo de ordenamiento inválido: ${sortField}, usando 'date' por defecto`);
+      query = query.order('date', { ascending: false });
+    }
+
+    // Limitar el número de resultados para mejorar el rendimiento
+    query = query.limit(100);
+    
+    console.log('Ejecutando consulta de asientos contables...');
+    // Ejecutar consulta
     const { data, error } = await query;
     
     if (error) {
+      console.error('Error al obtener asientos contables:', error);
       throw error;
     }
-
-    if (!data || data.length === 0) {
-      return { data: [], error: null };
-    }
-
-    // Obtener períodos contables para los asientos
-    const periodIds = [...new Set(data.filter(entry => entry.accounting_period_id).map(entry => entry.accounting_period_id))];
     
-    let periods: any[] = [];
-    if (periodIds.length > 0) {
-      const { data: periodsData } = await supabase
-        .from('accounting_periods')
-        .select('*')
-        .in('id', periodIds);
-      
-      periods = periodsData || [];
-    }
+    // Asegurarse que is_adjustment tenga un valor booleano
+    const processedData = (data || []).map(entry => ({
+      ...entry,
+      is_adjustment: entry.is_adjustment ?? false 
+    }));
 
-    // Calcular el total de débito y crédito para cada asiento
-    const entriesWithTotals = await Promise.all(
-      data.map(async entry => {
-        const { data: items, error: itemsError } = await supabase
-          .from('journal_entry_items')
-          .select('debit, credit')
-          .eq('journal_entry_id', entry.id);
-
-        if (itemsError) {
-          throw itemsError;
-        }
-
-        const totalDebit = items.reduce((sum, item) => sum + (parseFloat(item.debit) || 0), 0);
-        const totalCredit = items.reduce((sum, item) => sum + (parseFloat(item.credit) || 0), 0);
-
-        // Agregar el periodo correspondiente
-        const accountingPeriod = periods.find(p => p.id === entry.accounting_period_id);
-
-        return {
-          ...entry,
-          total_debit: totalDebit,
-          total_credit: totalCredit,
-          accounting_period: accountingPeriod || null
-        };
-      })
-    );
-
-    return { data: entriesWithTotals, error: null };
+    console.log(`Consulta exitosa: ${processedData.length} asientos encontrados`);
+    return { data: processedData, error: null };
   } catch (error) {
     console.error('Error al obtener asientos contables:', error);
+    // Devolver el error para que el componente lo maneje
     return { data: [], error };
   }
 }
@@ -393,22 +391,10 @@ export async function getJournalEntry(id: string): Promise<{
       throw entryError;
     }
 
-    // Obtener el período contable si existe
-    let accountingPeriod = null;
-    if (entry.accounting_period_id) {
-      const { data: periodData } = await supabase
-        .from('accounting_periods')
-        .select('*')
-        .eq('id', entry.accounting_period_id)
-        .single();
-      
-      accountingPeriod = periodData;
-    }
-    
     // Obtener las líneas del asiento
     const { data: itemsData, error: itemsError } = await supabase
       .from('journal_entry_items')
-      .select('*')
+      .select('*, account:accounts(id, code, name, type, nature)')
       .eq('journal_entry_id', id)
       .order('id');
 
@@ -416,35 +402,7 @@ export async function getJournalEntry(id: string): Promise<{
       throw itemsError;
     }
 
-    // Obtener cuentas asociadas a las líneas
-    const accountIds = [...new Set(itemsData.map(item => item.account_id))];
-    let accounts: any[] = [];
-    
-    if (accountIds.length > 0) {
-      const { data: accountsData } = await supabase
-        .from('accounts')
-        .select('*')
-        .in('id', accountIds);
-      
-      accounts = accountsData || [];
-    }
-
-    // Agregar información de cuenta a cada línea
-    const items = itemsData.map(item => {
-      const account = accounts.find(acc => acc.id === item.account_id);
-    return {
-        ...item,
-        account
-      };
-    });
-
-    // Agregar período contable al asiento
-    const entryWithPeriod = {
-      ...entry,
-      accounting_period: accountingPeriod
-    };
-
-    return { entry: entryWithPeriod, items, error: null };
+    return { entry, items: itemsData, error: null };
   } catch (error) {
     console.error('Error al obtener asiento contable:', error);
     return { entry: null, items: null, error };
@@ -452,430 +410,264 @@ export async function getJournalEntry(id: string): Promise<{
 }
 
 /**
- * Verifica que no se estén usando cuentas padre en las líneas del asiento
- */
-export async function validateAccountsForJournal(items: JournalEntryItem[]): Promise<{ valid: boolean; message: string }> {
-  // Verificar que al menos hay líneas para validar
-  if (!items || items.length === 0) {
-    return { valid: false, message: 'No hay líneas de asiento para validar' };
-  }
-  
-  // Obtener la lista de IDs de cuentas a verificar (solo las que no son vacías)
-  const accountIds = items
-    .filter(item => item.account_id && item.account_id.trim() !== '')
-    .map(item => item.account_id);
-  
-  if (accountIds.length === 0) {
-    return { valid: false, message: 'No hay cuentas seleccionadas' };
-  }
-  
-  // Verificar si hay duplicados (opcional, solo si queremos impedir líneas con mismas cuentas)
-  const uniqueAccountIds = new Set(accountIds);
-  if (uniqueAccountIds.size !== accountIds.length) {
-    // Hay cuentas duplicadas - Nota: Dejamos esto comentado porque podría ser válido tener varias líneas con la misma cuenta
-    // Aquí podríamos agregar un mensaje de advertencia si es necesario
-  }
-  
-  try {
-    // Verificar cuáles de las cuentas son de tipo "padre"
-    const { data, error } = await supabase
-      .from('accounts')
-      .select('id, code, name, is_parent, is_active')
-      .in('id', accountIds);
-    
-    if (error) {
-      console.error('Error al verificar cuentas:', error);
-      throw error;
-    }
-    
-    // Verificar si faltan cuentas (puede ocurrir si una cuenta fue eliminada)
-    if (!data || data.length !== accountIds.length) {
-      const foundIds = data ? data.map(acc => acc.id) : [];
-      const missingIds = accountIds.filter(id => !foundIds.includes(id));
-      
-      if (missingIds.length > 0) {
-        return { 
-          valid: false, 
-          message: `Algunas cuentas no existen o han sido eliminadas (IDs: ${missingIds.join(', ')})`
-        };
-      }
-    }
-    
-    // Verificar cuentas inactivas
-    const inactiveAccounts = data.filter(acc => !acc.is_active);
-    if (inactiveAccounts.length > 0) {
-      const inactiveList = inactiveAccounts.map(acc => `${acc.code} - ${acc.name}`).join(', ');
-      return { 
-        valid: false, 
-        message: `No se pueden usar cuentas inactivas: ${inactiveList}`
-      };
-    }
-    
-    // Verificar cuentas padre
-    const parentAccounts = data.filter(acc => acc.is_parent);
-    if (parentAccounts.length > 0) {
-      const parentList = parentAccounts.map(acc => `${acc.code} - ${acc.name}`).join(', ');
-      return { 
-        valid: false, 
-        message: `No se pueden usar cuentas padre en asientos contables: ${parentList}`
-      };
-    }
-    
-    return { valid: true, message: 'Cuentas válidas para el asiento' };
-  } catch (error: any) {
-    console.error('Error al validar cuentas para asiento:', error);
-    return { valid: false, message: error.message || 'Error al validar las cuentas' };
-  }
-}
-
-/**
- * Crear un nuevo asiento contable
+ * Crear un nuevo asiento contable (incluye ajustes)
  */
 export async function createJournalEntry(
-  formData: JournalEntryForm,
+  formData: JournalEntryForm, 
   items: JournalEntryItem[],
   userId: string
-): Promise<string> {
+): Promise<{ id: string | null; error: any }> {
   try {
-    // Validaciones preliminares
-    if (!formData) {
-      throw new Error('Se requiere información del asiento contable');
-    }
-    
-    if (!items || items.length < 2) {
-      throw new Error('Se requieren al menos dos líneas para crear un asiento contable');
-    }
-    
-    if (!userId) {
-      throw new Error('Se requiere el ID del usuario para crear el asiento');
-    }
-    
-    if (!formData.monthly_period_id) {
-      throw new Error('Se requiere el período mensual para crear el asiento');
-    }
-    
-    // Validar balance
-    const balanceValidation = validateBalance(items);
-    if (!balanceValidation.valid) {
-      throw new Error(balanceValidation.message);
-    }
-    
-    // Validar que no se usen cuentas padre
-    const accountsValidation = await validateAccountsForJournal(items);
-    if (!accountsValidation.valid) {
-      throw new Error(accountsValidation.message);
-    }
-    
-    // Validar fecha en el período
-    const dateValidation = await validateDateInPeriod(formData.date, formData.monthly_period_id);
-    if (!dateValidation.valid) {
-      throw new Error(dateValidation.message);
-    }
-    
-    // Obtener el período contable correspondiente al período mensual
-    let accounting_period_id = formData.accounting_period_id;
-    
-    if (!accounting_period_id) {
-      console.log('Obteniendo accounting_period_id para el período mensual:', formData.monthly_period_id);
-      
-      // Consultar el período mensual para obtener su fiscal_year_id (que es el accounting_period_id)
-      const { data: monthlyPeriod, error: monthlyPeriodError } = await supabase
-        .from('monthly_accounting_periods')
-        .select('fiscal_year_id')
-        .eq('id', formData.monthly_period_id)
-        .single();
-      
-      if (monthlyPeriodError) {
-        console.error('Error al obtener el período mensual:', monthlyPeriodError);
-        throw new Error(`Error al obtener el período contable: ${monthlyPeriodError.message}`);
-      }
-      
-      if (!monthlyPeriod || !monthlyPeriod.fiscal_year_id) {
-        throw new Error('No se pudo obtener el período fiscal asociado al período mensual');
-      }
-      
-      accounting_period_id = monthlyPeriod.fiscal_year_id;
-      console.log('Se obtuvo el accounting_period_id:', accounting_period_id);
-    }
-    
     // Calcular totales
     let totalDebit = new Decimal(0);
     let totalCredit = new Decimal(0);
     
     items.forEach(item => {
-      // Usar debit/credit si están definidos, de lo contrario usar amount con is_debit
-      if (item.debit !== undefined && item.debit !== null) {
-        totalDebit = totalDebit.plus(new Decimal(item.debit));
-      } else if (item.is_debit && item.amount !== undefined && item.amount !== null) {
-        totalDebit = totalDebit.plus(new Decimal(item.amount));
-      }
-      
-      if (item.credit !== undefined && item.credit !== null) {
-        totalCredit = totalCredit.plus(new Decimal(item.credit));
-      } else if (!item.is_debit && item.amount !== undefined && item.amount !== null) {
-        totalCredit = totalCredit.plus(new Decimal(item.amount));
-      }
+      // Usar roundAmount para consistencia
+      if (item.debit) totalDebit = totalDebit.plus(roundAmount(item.debit));
+      if (item.credit) totalCredit = totalCredit.plus(roundAmount(item.credit));
     });
     
-    // Generar ID para el asiento
+    // Verificar balance
+    const balance = validateBalance(items);
+    if (!balance.valid) {
+      throw new Error(balance.message);
+    }
+    
+    // Generar número de asiento - INICIO FIX
+    const { data: lastEntryData, error: lastEntryError } = await supabase
+      .from('journal_entries')
+      .select('entry_number')
+      .order('entry_number', { ascending: false })
+      .limit(1);
+      
+    if (lastEntryError) {
+      console.error('Error al obtener último número de asiento:', lastEntryError);
+      throw new Error('No se pudo generar número de asiento: ' + lastEntryError.message);
+    }
+    
+    // Determinar el próximo número de asiento
+    let nextEntryNumber = '1'; // Si no hay asientos previos, comenzar con 1
+    if (lastEntryData && lastEntryData.length > 0 && lastEntryData[0].entry_number) {
+      // Intentar convertir a número y sumar 1
+      const lastNumber = parseInt(lastEntryData[0].entry_number, 10);
+      if (!isNaN(lastNumber)) {
+        nextEntryNumber = (lastNumber + 1).toString();
+      }
+    }
+    // FIN FIX
+    
+    // Generar ID del asiento
     const entryId = uuidv4();
     
-    // Generar número de asiento
-    const entryNumber = await generateEntryNumber(formData.monthly_period_id);
+    // Preparar datos del asiento
+    const entryData = {
+      id: entryId,
+      entry_number: nextEntryNumber, // Añadido para resolver error 400
+      date: formData.date,
+      description: formData.description,
+      monthly_period_id: formData.monthly_period_id,
+      accounting_period_id: formData.accounting_period_id, // Asegurarse que se obtenga correctamente si es necesario
+      notes: formData.notes || null,
+      reference_number: formData.reference_number || null,
+      reference_date: formData.reference_date || null,
+      total_debit: totalDebit.toNumber(),
+      total_credit: totalCredit.toNumber(),
+      is_balanced: true,
+      is_approved: false,
+      is_posted: false,
+      status: 'pendiente',
+      // Campos de ajuste
+      is_adjustment: formData.is_adjustment ?? false,
+      adjustment_type: formData.is_adjustment ? formData.adjustment_type : null,
+      adjusted_entry_id: formData.is_adjustment ? formData.adjusted_entry_id : null,
+      // Auditoría
+      created_by: userId,
+      created_at: new Date().toISOString()
+    };
     
-    // Crear asiento contable
+    // Mostrar los datos que se están enviando en depuración
+    console.debug('Datos del asiento a crear:', entryData);
+    
+    // Insertar asiento
     const { error: entryError } = await supabase
       .from('journal_entries')
-      .insert([{
-        id: entryId,
-        entry_number: entryNumber,
-        date: formData.date,
-        description: formData.description,
-        monthly_period_id: formData.monthly_period_id,
-        accounting_period_id: accounting_period_id,
-        notes: formData.notes || null,
-        reference_number: formData.reference_number || null,
-        reference_date: formData.reference_date || null,
-        total_debit: totalDebit.toNumber(),
-        total_credit: totalCredit.toNumber(),
-        is_balanced: true,
-        is_approved: false,
-        is_posted: false,
-        status: 'pendiente',
-        created_by: userId
-      }]);
+      .insert(entryData);
     
     if (entryError) {
-      console.error('Error al crear el asiento:', entryError);
-      throw new Error(`Error al crear el asiento: ${entryError.message}`);
+      console.error('Error al insertar asiento:', entryError);
+      throw entryError;
     }
     
-    // Crear detalles del asiento
-    const journalEntryItems = items.map(item => {
-      // Determinar los valores de debe y haber
-      let debit = 0;
-      let credit = 0;
-      
-      if (item.debit !== undefined && item.debit !== null) {
-        debit = parseFloat(item.debit.toString());
-      } else if (item.is_debit && item.amount !== undefined && item.amount !== null) {
-        debit = parseFloat(item.amount.toString());
-      }
-      
-      if (item.credit !== undefined && item.credit !== null) {
-        credit = parseFloat(item.credit.toString());
-      } else if (!item.is_debit && item.amount !== undefined && item.amount !== null) {
-        credit = parseFloat(item.amount.toString());
-      }
-      
-      return {
-        id: uuidv4(),
-        journal_entry_id: entryId,
-        account_id: item.account_id,
-        description: item.description || null,
-        debit: debit,
-        credit: credit,
-        created_by: userId
-      };
-    });
+    // Preparar líneas del asiento
+    const entryItems = items.map(item => ({
+      journal_entry_id: entryId,
+      account_id: item.account_id,
+      description: item.description || null,
+      // Usar roundAmount aquí también
+      debit: roundAmount(item.debit),
+      credit: roundAmount(item.credit),
+      created_by: userId,
+      created_at: new Date().toISOString()
+    }));
     
+    // Insertar líneas
     const { error: itemsError } = await supabase
       .from('journal_entry_items')
-      .insert(journalEntryItems);
+      .insert(entryItems);
     
     if (itemsError) {
-      // Si hay error en los items, eliminar el asiento creado previamente
-      await supabase.from('journal_entries').delete().eq('id', entryId);
-      console.error('Error al crear los detalles del asiento:', itemsError);
-      throw new Error(`Error al crear los detalles del asiento: ${itemsError.message}`);
+        // Considerar transacción: Si fallan las líneas, ¿debería eliminarse el asiento?
+        // Por ahora, solo lanzamos el error.
+        console.error('Error al insertar líneas de asiento:', itemsError);
+        throw itemsError;
     }
     
-    return entryId;
-  } catch (error: any) {
+    return { id: entryId, error: null };
+  } catch (error) {
     console.error('Error al crear asiento contable:', error);
-    throw new Error(error.message || 'Error al crear el asiento contable');
+    return { id: null, error };
   }
 }
 
 /**
- * Actualizar un asiento contable existente
+ * Actualizar un asiento contable existente (incluye ajustes)
  */
 export async function updateJournalEntry(
   entryId: string,
   formData: JournalEntryForm,
   items: JournalEntryItem[],
   userId: string
-): Promise<void> {
+): Promise<{ error: any }> {
   try {
-    // Validar balance
-    const balanceValidation = validateBalance(items);
-    if (!balanceValidation.valid) {
-      throw new Error(balanceValidation.message);
-    }
-    
-    // Validar que no se usen cuentas padre
-    const accountsValidation = await validateAccountsForJournal(items);
-    if (!accountsValidation.valid) {
-      throw new Error(accountsValidation.message);
-    }
-    
-    // Validar fecha en el período
-    const dateValidation = await validateDateInPeriod(formData.date, formData.monthly_period_id);
-    if (!dateValidation.valid) {
-      throw new Error(dateValidation.message);
-    }
-    
-    // Verificar si el asiento ya está publicado o aprobado
+    // Verificar si el asiento existe y su estado
     const { data: existingEntry, error: checkError } = await supabase
       .from('journal_entries')
-      .select('is_approved, is_posted, accounting_period_id')
+      .select('id, status, is_approved, is_posted')
       .eq('id', entryId)
       .single();
     
     if (checkError) throw checkError;
-    
-    if (existingEntry.is_posted) {
-      throw new Error('No se puede modificar un asiento que ya está publicado');
-    }
-    
-    if (existingEntry.is_approved) {
-      throw new Error('No se puede modificar un asiento que ya está aprobado');
-    }
-    
-    // Obtener el período contable si no se ha especificado y ha cambiado el período mensual
-    let accounting_period_id = formData.accounting_period_id || existingEntry.accounting_period_id;
-    
-    if (!accounting_period_id) {
-      console.log('Obteniendo accounting_period_id para la actualización del período mensual:', formData.monthly_period_id);
-      
-      // Consultar el período mensual para obtener su fiscal_year_id (que es el accounting_period_id)
-      const { data: monthlyPeriod, error: monthlyPeriodError } = await supabase
-        .from('monthly_accounting_periods')
-        .select('fiscal_year_id')
-        .eq('id', formData.monthly_period_id)
-        .single();
-      
-      if (monthlyPeriodError) {
-        console.error('Error al obtener el período mensual:', monthlyPeriodError);
-        throw new Error(`Error al obtener el período contable: ${monthlyPeriodError.message}`);
-      }
-      
-      if (!monthlyPeriod || !monthlyPeriod.fiscal_year_id) {
-        throw new Error('No se pudo obtener el período fiscal asociado al período mensual');
-      }
-      
-      accounting_period_id = monthlyPeriod.fiscal_year_id;
-      console.log('Se obtuvo el accounting_period_id para actualización:', accounting_period_id);
-    }
+    if (!existingEntry) throw new Error('El asiento contable no existe');
+    if (existingEntry.is_approved) throw new Error('No se puede modificar un asiento aprobado');
+    if (existingEntry.is_posted) throw new Error('No se puede modificar un asiento contabilizado');
+    if (existingEntry.status === 'voided') throw new Error('No se puede modificar un asiento anulado');
     
     // Calcular totales
     let totalDebit = new Decimal(0);
     let totalCredit = new Decimal(0);
-    
     items.forEach(item => {
-      // Usar debit/credit si están definidos, de lo contrario usar amount con is_debit
-      if (item.debit !== undefined && item.debit !== null) {
-        totalDebit = totalDebit.plus(new Decimal(item.debit));
-      } else if (item.is_debit && item.amount !== undefined && item.amount !== null) {
-        totalDebit = totalDebit.plus(new Decimal(item.amount));
-      }
-      
-      if (item.credit !== undefined && item.credit !== null) {
-        totalCredit = totalCredit.plus(new Decimal(item.credit));
-      } else if (!item.is_debit && item.amount !== undefined && item.amount !== null) {
-        totalCredit = totalCredit.plus(new Decimal(item.amount));
-      }
+      if (item.debit) totalDebit = totalDebit.plus(roundAmount(item.debit));
+      if (item.credit) totalCredit = totalCredit.plus(roundAmount(item.credit));
     });
+    
+    // Verificar balance
+    const balance = validateBalance(items);
+    if (!balance.valid) throw new Error(balance.message);
+    
+    // Preparar datos del asiento para actualizar
+    const entryData = {
+      date: formData.date,
+      description: formData.description,
+      monthly_period_id: formData.monthly_period_id,
+      accounting_period_id: formData.accounting_period_id,
+      notes: formData.notes || null,
+      reference_number: formData.reference_number || null,
+      reference_date: formData.reference_date || null,
+      total_debit: totalDebit.toNumber(),
+      total_credit: totalCredit.toNumber(),
+      is_balanced: true,
+      // Campos de ajuste (asumimos que no se cambia el tipo de asiento de regular a ajuste o viceversa en edición)
+      // Si se quisiera permitir, se necesitaría lógica adicional
+      adjustment_type: formData.is_adjustment ? formData.adjustment_type : null,
+      adjusted_entry_id: formData.is_adjustment ? formData.adjusted_entry_id : null,
+      // Auditoría
+      updated_at: new Date().toISOString()
+    };
     
     // Actualizar asiento
     const { error: updateError } = await supabase
       .from('journal_entries')
-      .update({
-        date: formData.date,
-        description: formData.description,
-        monthly_period_id: formData.monthly_period_id,
-        accounting_period_id: accounting_period_id,
-        notes: formData.notes || null,
-        reference_number: formData.reference_number || null,
-        reference_date: formData.reference_date || null,
-        total_debit: totalDebit.toNumber(),
-        total_credit: totalCredit.toNumber(),
-        is_balanced: true,
-        status: 'pendiente',
-        updated_at: new Date().toISOString()
-      })
+      .update(entryData)
       .eq('id', entryId);
-    
     if (updateError) throw updateError;
     
-    // Eliminar líneas antiguas
+    // ----- Gestión de Líneas: Estrategia de Borrar e Insertar -----
+    // Podría optimizarse comparando líneas existentes y nuevas si fuera necesario
+    
+    // Eliminar líneas existentes
     const { error: deleteError } = await supabase
       .from('journal_entry_items')
       .delete()
       .eq('journal_entry_id', entryId);
-    
     if (deleteError) throw deleteError;
     
-    // Insertar nuevas líneas
-    const journalEntryItems = items.map(item => {
-      // Determinar los valores de debe y haber
-      let debit = 0;
-      let credit = 0;
-      
-      if (item.debit !== undefined && item.debit !== null) {
-        debit = parseFloat(item.debit.toString());
-      } else if (item.is_debit && item.amount !== undefined && item.amount !== null) {
-        debit = parseFloat(item.amount.toString());
-      }
-      
-      if (item.credit !== undefined && item.credit !== null) {
-        credit = parseFloat(item.credit.toString());
-      } else if (!item.is_debit && item.amount !== undefined && item.amount !== null) {
-        credit = parseFloat(item.amount.toString());
-      }
-      
-      return {
-        id: uuidv4(),
-        journal_entry_id: entryId,
-        account_id: item.account_id,
-        description: item.description || null,
-        debit: debit,
-        credit: credit,
-        created_by: userId
-      };
-    });
+    // Preparar nuevas líneas
+    const entryItems = items.map(item => ({
+      journal_entry_id: entryId,
+      account_id: item.account_id,
+      description: item.description || null,
+      debit: roundAmount(item.debit),
+      credit: roundAmount(item.credit),
+      // Asumimos que created_by/at no se actualizan, pero podríamos añadir updated_by/at si el esquema lo soporta
+      created_by: userId, // O mantener el original si es necesario rastrear creación vs actualización de línea
+      created_at: new Date().toISOString() // O mantener el original
+    }));
     
+    // Insertar nuevas líneas
     const { error: insertError } = await supabase
       .from('journal_entry_items')
-      .insert(journalEntryItems);
+      .insert(entryItems);
+    if (insertError) throw insertError; // Considerar rollback si es posible/necesario
     
-    if (insertError) throw insertError;
-  } catch (error: any) {
+    return { error: null };
+  } catch (error) {
     console.error('Error al actualizar asiento contable:', error);
-    throw new Error(error.message || 'Error al actualizar el asiento contable');
+    return { error };
   }
 }
 
 /**
  * Aprobar un asiento contable
  */
-export async function approveJournalEntry(id: string, userId?: string): Promise<{ error: any }> {
+export async function approveJournalEntry(id: string, userId: string): Promise<{ error: any }> {
   try {
-    const { error } = await supabase
+    // Verificar si el asiento existe
+    const { data: entry, error: checkError } = await supabase
+      .from('journal_entries')
+      .select('id, status, is_approved')
+      .eq('id', id)
+      .single();
+    
+    if (checkError) throw checkError;
+    
+    if (!entry) {
+      throw new Error('El asiento contable no existe');
+    }
+    
+    // Verificar que el asiento no esté ya aprobado o anulado
+    if (entry.is_approved) {
+      throw new Error('El asiento ya está aprobado');
+    }
+    
+    if (entry.status === 'voided') {
+      throw new Error('No se puede aprobar un asiento anulado');
+    }
+    
+    // Aprobar el asiento
+    const { error: updateError } = await supabase
       .from('journal_entries')
       .update({
-        status: 'aprobado',
         is_approved: true,
+        status: 'aprobado',
+        approved_by: userId,
         approved_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-        approved_by: userId || null
+        updated_at: new Date().toISOString()
       })
       .eq('id', id);
-
-    if (error) {
-      throw error;
-    }
-
+    
+    if (updateError) throw updateError;
+    
     return { error: null };
   } catch (error) {
     console.error('Error al aprobar asiento contable:', error);
@@ -888,16 +680,40 @@ export async function approveJournalEntry(id: string, userId?: string): Promise<
  */
 export async function deleteJournalEntry(id: string): Promise<{ error: any }> {
   try {
+    // Verificar si el asiento existe
+    const { data: entry, error: checkError } = await supabase
+      .from('journal_entries')
+      .select('id, status, is_approved, is_posted')
+      .eq('id', id)
+      .single();
+    
+    if (checkError) throw checkError;
+    
+    if (!entry) {
+      throw new Error('El asiento contable no existe');
+    }
+    
+    // Verificar que el asiento no esté aprobado, contabilizado o anulado
+    if (entry.is_approved) {
+      throw new Error('No se puede eliminar un asiento aprobado');
+    }
+    
+    if (entry.is_posted) {
+      throw new Error('No se puede eliminar un asiento contabilizado');
+    }
+    
+    if (entry.status === 'voided') {
+      throw new Error('No se puede eliminar un asiento anulado');
+    }
+    
     // Primero eliminar las líneas del asiento
-    const { error: itemsError } = await supabase
+    const { error: deleteItemsError } = await supabase
       .from('journal_entry_items')
       .delete()
       .eq('journal_entry_id', id);
-
-    if (itemsError) {
-      throw itemsError;
-    }
-
+    
+    if (deleteItemsError) throw deleteItemsError;
+    
     // Luego eliminar el asiento
     const { error } = await supabase
       .from('journal_entries')
@@ -912,84 +728,6 @@ export async function deleteJournalEntry(id: string): Promise<{ error: any }> {
   } catch (error) {
     console.error('Error al eliminar asiento contable:', error);
     return { error };
-  }
-}
-
-/**
- * Duplica un asiento contable
- */
-export async function duplicateJournalEntry(entryId: string, userId: string): Promise<{ id: string | null; error: any }> {
-  try {
-    // Obtener el asiento original con sus líneas
-    const { entry, items, error } = await getJournalEntry(entryId);
-    
-    if (error) throw error;
-    if (!entry || !items) {
-      throw new Error('No se pudo encontrar el asiento contable o sus líneas');
-    }
-    
-    // Crear un nuevo asiento basado en el original
-    const newEntryData = {
-      date: new Date().toISOString().split('T')[0], // Fecha actual
-      description: `Copia de: ${entry.description}`,
-      accounting_period_id: entry.accounting_period_id,
-      status: 'pendiente',
-      is_approved: false,
-      is_balanced: entry.is_balanced,
-      notes: entry.notes,
-      reference_number: entry.reference_number,
-      reference_date: entry.reference_date,
-      total_debit: entry.total_debit,
-      total_credit: entry.total_credit,
-      created_by: userId
-    };
-    
-    // Insertar el nuevo asiento
-    const { data: newEntry, error: insertError } = await supabase
-      .from('journal_entries')
-      .insert(newEntryData)
-      .select('id')
-      .single();
-    
-    if (insertError) throw insertError;
-    
-    // Duplicar todas las líneas del asiento
-    const newItems = items.map(item => ({
-      journal_entry_id: newEntry.id,
-      account_id: item.account_id,
-      description: item.description,
-      debit: item.debit,
-      credit: item.credit,
-      created_by: userId
-    }));
-    
-    const { error: itemsError } = await supabase
-        .from('journal_entry_items')
-      .insert(newItems);
-    
-    if (itemsError) throw itemsError;
-    
-    return { id: newEntry.id, error: null };
-  } catch (error) {
-    console.error('Error al duplicar asiento contable:', error);
-    return { id: null, error };
-  }
-}
-
-/**
- * Obtiene los usuarios que tienen permisos para crear/editar asientos
- */
-export async function getJournalUsers(): Promise<{ id: string; email: string; full_name: string }[]> {
-  try {
-    const { data, error } = await supabase
-      .from('user_profiles')
-      .select('id, email, full_name');
-    
-    if (error) throw error;
-    return data || [];
-  } catch (error) {
-    console.error('Error al obtener usuarios:', error);
-    return [];
   }
 }
 
@@ -1025,12 +763,6 @@ export async function cancelJournalEntry(id: string, userId: string, reason: str
       throw new Error('Asiento contable no encontrado');
     }
     
-    // Verificar si el período está cerrado
-    const isClosed = await isPeriodClosed(entry.accounting_period_id);
-    if (isClosed) {
-      throw new Error('No se pueden anular asientos en un período contable cerrado');
-    }
-    
     // Verificar que el asiento no esté ya anulado
     if (entry.status === 'voided') {
       throw new Error('Este asiento ya ha sido anulado');
@@ -1042,8 +774,7 @@ export async function cancelJournalEntry(id: string, userId: string, reason: str
       .update({
         status: 'voided',
         notes: `${entry.notes ? entry.notes + ' | ' : ''}ANULADO: ${reason}`,
-        updated_at: new Date().toISOString(),
-        updated_by: userId
+        updated_at: new Date().toISOString()
       })
       .eq('id', id);
     
@@ -1051,25 +782,26 @@ export async function cancelJournalEntry(id: string, userId: string, reason: str
       throw updateError;
     }
     
-    // Verificar que el asiento realmente se haya anulado
-    const { data: updatedEntry, error: verifyError } = await supabase
-        .from('journal_entries')
-      .select('status')
-      .eq('id', id)
-      .single();
-    
-    if (verifyError) {
-      throw verifyError;
-    }
-    
-    if (!updatedEntry || updatedEntry.status !== 'voided') {
-      throw new Error('Error al verificar la anulación del asiento');
-    }
-    
-    console.log('Asiento anulado correctamente:', id);
     return { error: null };
   } catch (error) {
     console.error('Error al anular asiento contable:', error);
     return { error };
+  }
+}
+
+/**
+ * Obtiene los usuarios que tienen permisos para crear/editar asientos
+ */
+export async function getJournalUsers(): Promise<{ id: string; email: string; full_name: string }[]> {
+  try {
+    const { data, error } = await supabase
+      .from('user_profiles')
+      .select('id, email, full_name');
+    
+    if (error) throw error;
+    return data || [];
+  } catch (error) {
+    console.error('Error al obtener usuarios:', error);
+    return [];
   }
 } 

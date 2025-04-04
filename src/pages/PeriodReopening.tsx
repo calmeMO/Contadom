@@ -1,24 +1,22 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
 import { 
-  Calendar, 
   ArrowRight, 
   Check, 
   AlertTriangle,
   ChevronDown,
   ChevronUp,
   Loader,
+  Plus,
   CreditCard,
   Building,
   TrendingUp,
-  Plus,
   BookOpen
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { supabase } from '../lib/supabase';
 import { 
   ReopeningData, 
-  ReopeningResult, 
   generateOpeningEntries, 
   verifyReadyForReopening,
   getPeriodsForReopening,
@@ -192,7 +190,7 @@ export function PeriodReopening() {
         
         // Mostrar resumen de la reapertura
         setTimeout(() => {
-          toast.info(`Resumen: Activos $${formatCurrency(result.totalAssets)}, Pasivos $${formatCurrency(result.totalLiabilities)}, Patrimonio $${formatCurrency(result.totalEquity)}`);
+          toast.info(`Resumen: Activos $${formatCurrency(result.totalAssets || 0)}, Pasivos $${formatCurrency(result.totalLiabilities || 0)}, Patrimonio $${formatCurrency(result.totalEquity || 0)}`);
         }, 1000);
       } else {
         toast.error(result.message);
