@@ -83,7 +83,8 @@ const buildAccountHierarchy = (flatAccounts: any[]): AccountOption[] => {
           ...acc, 
           children: [], 
           level: 0, 
-          fullName: `${acc.code} - ${acc.name}`
+          fullName: `${acc.code} - ${acc.name}`,
+          isParent: acc.is_parent
       });
   });
 
@@ -156,7 +157,11 @@ export default function JournalEntryForm({
   const [entries, setEntries] = useState<any[]>([]);
   
   // Ahora useMemo puede llamar a buildAccountHierarchy porque ya está definida
-  const hierarchicalAccounts = useMemo(() => buildAccountHierarchy(flatAccounts), [flatAccounts]);
+  const hierarchicalAccounts = useMemo(() => {
+    const result = buildAccountHierarchy(flatAccounts);
+    console.log('Estructura jerárquica de cuentas:', result);
+    return result;
+  }, [flatAccounts]);
 
   // Obtener usuario actual
   useEffect(() => {
