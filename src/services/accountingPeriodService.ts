@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { toast } from 'react-toastify';
 import { format, parseISO, startOfMonth, endOfMonth, addMonths } from 'date-fns';
+import { FiscalYearType } from '../types/database';
 
 export interface AccountingPeriod {
   id: string;
@@ -76,7 +77,7 @@ export interface FiscalYear {
   reopened_by?: string;
   reclosed_at?: string;
   reclosed_by?: string;
-  fiscal_year_type: 'calendar' | 'custom';
+  fiscal_year_type: FiscalYearType;
   months?: MonthlyPeriod[];
   monthly_periods?: MonthlyPeriod[];
   closed_by_email?: string;
@@ -90,7 +91,7 @@ export interface PeriodForm {
   start_date: string;
   end_date: string;
   notes?: string;
-  fiscal_year_type: 'calendar' | 'custom';
+  fiscal_year_type: FiscalYearType;
 }
 
 /**
@@ -247,11 +248,16 @@ export async function createAnnualPeriod(
 
 /**
  * Genera períodos mensuales a partir de un rango de fechas
+ * @param parentId ID del año fiscal padre
+ * @param startDate Fecha de inicio del año fiscal
+ * @param endDate Fecha de fin del año fiscal
+ * @param fiscalYearType Tipo de año fiscal: 'calendar', 'fiscal_mar', 'fiscal_jun', 'fiscal_sep'
  */
 export function generateMonthlyPeriods(
   parentId: string,
   startDate: string,
-  endDate: string
+  endDate: string,
+  fiscalYearType: FiscalYearType = 'calendar'
 ): MonthlyPeriod[] {
   const periods: MonthlyPeriod[] = [];
   
@@ -259,20 +265,63 @@ export function generateMonthlyPeriods(
   let currentDate = startOfMonth(parseISO(startDate));
   const lastDate = endOfMonth(parseISO(endDate));
   
+  // Nombres de los meses en español
+  const monthNames = [
+    'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 
+    'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
+  ];
+  
+  // Obtener mes y año actual para determinar el período activo
+  const today = new Date();
+  const currentMonth = today.getMonth() + 1; // 1-12
+  const currentYear = today.getFullYear();
+  
   // Generar períodos para cada mes en el rango
   while (currentDate <= lastDate) {
     const periodEndDate = endOfMonth(currentDate);
     const month = currentDate.getMonth() + 1; // 1-12
     const year = currentDate.getFullYear();
     
+    // Determinar si este mes debe estar activo (solo el mes actual)
+    const isActive = month === currentMonth && year === currentYear;
+    
+    // Nombre del mes según el tipo de año fiscal
+    // Para años fiscales, indicamos el orden dentro del año fiscal (1er mes, 2do mes, etc.)
+    let periodName = '';
+    let fiscalOrder = 0;
+    
+    switch (fiscalYearType) {
+      case 'calendar':
+        // Año calendario: simplemente el nombre del mes y año
+        periodName = `${monthNames[month - 1]} ${year}`;
+        break;
+      case 'fiscal_mar': // Año fiscal Abr-Mar
+        // Abril es el primer mes, Marzo es el último
+        fiscalOrder = month < 4 ? month + 9 : month - 3;
+        periodName = `${monthNames[month - 1]} ${year} (${fiscalOrder}° mes)`;
+        break;
+      case 'fiscal_jun': // Año fiscal Jul-Jun
+        // Julio es el primer mes, Junio es el último
+        fiscalOrder = month < 7 ? month + 6 : month - 6;
+        periodName = `${monthNames[month - 1]} ${year} (${fiscalOrder}° mes)`;
+        break;
+      case 'fiscal_sep': // Año fiscal Oct-Sep
+        // Octubre es el primer mes, Septiembre es el último
+        fiscalOrder = month < 10 ? month + 3 : month - 9;
+        periodName = `${monthNames[month - 1]} ${year} (${fiscalOrder}° mes)`;
+        break;
+      default:
+        periodName = `${monthNames[month - 1]} ${year}`;
+    }
+    
     periods.push({
-      name: `${format(currentDate, 'MMMM yyyy')}`,
+      name: periodName,
       month,
       year,
       start_date: format(currentDate, 'yyyy-MM-dd'),
       end_date: format(periodEndDate, 'yyyy-MM-dd'),
       is_closed: false,
-      is_active: true,
+      is_active: isActive,
       fiscal_year_id: parentId
     });
     
@@ -798,7 +847,7 @@ export async function createFiscalYear(
     if (!data) throw new Error('Error al crear año fiscal');
 
     // Generar períodos mensuales
-    const monthlyPeriods = generateMonthlyPeriods(data.id, formData.start_date, formData.end_date);
+    const monthlyPeriods = generateMonthlyPeriods(data.id, formData.start_date, formData.end_date, formData.fiscal_year_type);
     
     // Enriquecer los datos de período mensual
     const monthsToInsert = monthlyPeriods.map(period => ({
@@ -1417,65 +1466,32 @@ export async function initializeMonthlyPeriodsForFiscalYear(
       console.log(`Eliminados ${existingPeriods.length} períodos mensuales existentes`);
     }
     
-    // Generar períodos mensuales
-    const startDate = new Date(fiscalYear.start_date);
-    const endDate = new Date(fiscalYear.end_date);
-    const periods = [];
+    // Generar períodos mensuales utilizando la función mejorada
+    const monthlyPeriods = generateMonthlyPeriods(
+      fiscalYearId, 
+      fiscalYear.start_date, 
+      fiscalYear.end_date,
+      fiscalYear.fiscal_year_type
+    );
     
-    // Obtener mes y año actual para activar solo el período correspondiente
-    const currentDate = new Date();
-    const currentYear = currentDate.getFullYear();
-    const currentMonth = currentDate.getMonth() + 1; // 1-12
-    
-    // Crear un período para cada mes en el rango
-    let currentDate2 = new Date(startDate);
-    while (currentDate2 <= endDate) {
-      const year = currentDate2.getFullYear();
-      const month = currentDate2.getMonth() + 1; // 1-12
-      
-      // Calcular el primer día del mes
-      const firstDay = new Date(year, month - 1, 1);
-      
-      // Calcular el último día del mes
-      const lastDay = new Date(year, month, 0);
-      
-      // Crear nombre del período (ej: "Enero 2025")
-      const monthNames = [
-        'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
-        'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'
-      ];
-      const periodName = `${monthNames[month - 1]} ${year}`;
-      
-      // Determinar si este período debe estar activo
-      const isActive = (year === currentYear && month === currentMonth) && fiscalYear.is_active;
-      
-      periods.push({
-        fiscal_year_id: fiscalYearId,
-        month,
-        year,
-        name: periodName,
-        start_date: firstDay.toISOString().split('T')[0],
-        end_date: lastDay.toISOString().split('T')[0],
-        is_closed: false,
-        is_active: isActive,
-        created_by: userId,
-        created_at: new Date().toISOString()
-      });
-      
-      // Avanzar al siguiente mes
-      currentDate2.setMonth(currentDate2.getMonth() + 1);
-    }
+    // Preparar datos para inserción
+    const periodsToInsert = monthlyPeriods.map(period => ({
+      ...period,
+      created_by: userId,
+      created_at: new Date().toISOString()
+    }));
     
     // Insertar los períodos mensuales en la base de datos
-    if (periods.length > 0) {
+    if (periodsToInsert.length > 0) {
       const { error } = await supabase
         .from('monthly_accounting_periods')
-        .insert(periods);
+        .insert(periodsToInsert);
         
       if (error) throw error;
       
-      console.log(`Creados ${periods.length} períodos mensuales para el año fiscal ${fiscalYear.name}`);
-      console.log(`Período activo: ${periods.find(p => p.is_active)?.name || 'Ninguno'}`);
+      console.log(`Creados ${periodsToInsert.length} períodos mensuales para el año fiscal ${fiscalYear.name}`);
+      const activePeriod = periodsToInsert.find(p => p.is_active);
+      console.log(`Período activo: ${activePeriod?.name || 'Ninguno'}`);
     }
     
     return { success: true };

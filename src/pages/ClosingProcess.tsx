@@ -1,640 +1,570 @@
-import { useState, useEffect } from 'react';
-import { toast } from 'react-toastify';
-import { 
-  Lock, 
-  UnlockIcon, 
-  Clock, 
-  Calendar, 
-  FileCheck, 
-  AlertTriangle,
-  ChevronDown,
-  ChevronUp,
-  Loader,
-  BarChart,
-  ArrowRightCircle,
-  Banknote
-} from 'lucide-react';
-import { useAuth } from '../contexts/AuthContext';
+import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
+import { toast } from 'react-toastify';
+import {
+  Calendar,
+  CheckCircle,
+  XCircle,
+  AlertTriangle,
+  Loader,
+  ArrowRight,
+  FileCheck,
+  Lock
+} from 'lucide-react';
+import { format } from 'date-fns';
 import { 
-  ClosingData, 
-  generateClosingEntries, 
-  reopenAccountingPeriod, 
-  verifyPeriodReadyForClosing,
-  getClosingEntries,
-  updateDatabaseSchema
+  checkPeriodReadyForClosing, 
+  generateClosingEntry,
+  closePeriod,
+  createNextPeriod,
+  generateOpeningEntry
 } from '../services/closingService';
-import { formatCurrency } from '../utils/formatters';
 
-export function ClosingProcess() {
+export default function ClosingProcess() {
   const [loading, setLoading] = useState(true);
-  const [periods, setPeriods] = useState<any[]>([]);
-  const [selectedPeriod, setSelectedPeriod] = useState<string>('');
-  const [periodData, setPeriodData] = useState<any | null>(null);
-  const [closingStatus, setClosingStatus] = useState<{ ready: boolean; message: string } | null>(null);
-  const [processing, setProcessing] = useState(false);
-  const [closingEntries, setClosingEntries] = useState<any[]>([]);
-  const [expandedEntry, setExpandedEntry] = useState<string | null>(null);
-  const [reopenReason, setReopenReason] = useState('');
-  const [showReopenDialog, setShowReopenDialog] = useState(false);
-  
-  const { user } = useAuth();
-  
+  const [activePeriod, setActivePeriod] = useState<any>(null);
+  const [closingStatus, setClosingStatus] = useState<any>(null);
+  const [user, setUser] = useState<any>(null);
+  const [closingStep, setClosingStep] = useState<
+    'check' | 'generate' | 'review' | 'close' | 'complete'
+  >('check');
+  const [closingEntryId, setClosingEntryId] = useState<string | null>(null);
+  const [nextPeriodId, setNextPeriodId] = useState<string | null>(null);
+  const [processingAction, setProcessingAction] = useState(false);
+
+  // Obtener el usuario actual
   useEffect(() => {
-    fetchInitialData();
+    const getUserData = async () => {
+      const { data } = await supabase.auth.getUser();
+      setUser(data.user);
+    };
+    getUserData();
   }, []);
-  
+
+  // Cargar período activo al iniciar
   useEffect(() => {
-    if (selectedPeriod) {
-      checkPeriodStatus(selectedPeriod);
-      fetchPeriodData(selectedPeriod);
-      fetchClosingEntries(selectedPeriod);
+    fetchActivePeriod();
+  }, []);
+
+  // Verificar estado de cierre cuando se carga el período
+  useEffect(() => {
+    if (activePeriod) {
+      checkClosingStatus();
     }
-  }, [selectedPeriod]);
-  
-  async function fetchInitialData() {
+  }, [activePeriod]);
+
+  // Función para cargar el período contable activo
+  async function fetchActivePeriod() {
     try {
       setLoading(true);
       
-      // Asegurarse de que existen las columnas necesarias en la base de datos
-      await updateDatabaseSchema();
-      
-      // Cargar períodos contables
-      const { data: periodsData, error: periodsError } = await supabase
+      // Obtener el período activo y no cerrado
+      const { data, error } = await supabase
         .from('accounting_periods')
-        .select(`
-          id, 
-          name, 
-          start_date, 
-          end_date, 
-          is_closed,
-          closed_at,
-          closed_by,
-          is_reopened,
-          reopened_at,
-          reopened_by
-        `)
-        .order('end_date', { ascending: false });
-      
-      if (periodsError) throw periodsError;
-      setPeriods(periodsData || []);
-      
-      // Establecer período seleccionado por defecto (el más reciente no cerrado)
-      if (periodsData && periodsData.length > 0) {
-        const defaultPeriod = periodsData.find(p => !p.is_closed) || periodsData[0];
-        setSelectedPeriod(defaultPeriod.id);
+        .select('*')
+        .eq('is_active', true)
+        .eq('is_closed', false)
+        .order('end_date', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        toast.warning('No se encontró un período contable activo');
+        return;
       }
       
+      setActivePeriod(data[0]);
     } catch (error) {
-      console.error('Error al cargar datos iniciales:', error);
-      toast.error('Error al cargar los datos. Por favor, recargue la página.');
+      console.error('Error al cargar período contable activo:', error);
+      toast.error('Error al cargar el período contable activo');
     } finally {
       setLoading(false);
     }
   }
-  
-  async function checkPeriodStatus(periodId: string) {
+
+  // Verificar si el período está listo para ser cerrado
+  const checkClosingStatus = useCallback(async () => {
+    if (!activePeriod) return;
+    
     try {
-      const status = await verifyPeriodReadyForClosing(periodId);
+      setLoading(true);
+      const status = await checkPeriodReadyForClosing(activePeriod.id);
       setClosingStatus(status);
     } catch (error) {
-      console.error('Error al verificar estado del período:', error);
-      setClosingStatus({
-        ready: false,
-        message: 'Error al verificar el estado del período'
-      });
+      console.error('Error al verificar estado de cierre:', error);
+      toast.error('Error al verificar si el período está listo para ser cerrado');
+    } finally {
+      setLoading(false);
     }
-  }
-  
-  async function fetchPeriodData(periodId: string) {
-    try {
-      // Cargar detalles del período
-      const { data: period, error: periodError } = await supabase
-        .from('accounting_periods_with_users')
-        .select('*')
-        .eq('id', periodId)
-        .single();
-      
-      if (periodError) throw periodError;
-      setPeriodData(period);
-      
-      // Si está cerrado, cargar también información financiera
-      if (period.is_closed) {
-        const { data: financialData, error: financialError } = await supabase
-          .from('financial_statements')
-          .select('type, data')
-          .eq('accounting_period_id', periodId);
-        
-        if (financialError) throw financialError;
-        
-        if (financialData && financialData.length > 0) {
-          // Adjuntar datos financieros al período
-          setPeriodData({
-            ...period,
-            financialData: financialData.reduce((acc: Record<string, any>, item) => {
-              acc[item.type] = item.data;
-              return acc;
-            }, {})
-          });
-        }
-      }
-    } catch (error) {
-      console.error('Error al cargar datos del período:', error);
-      toast.error('Error al cargar los datos del período.');
-    }
-  }
-  
-  async function fetchClosingEntries(periodId: string) {
-    try {
-      const entries = await getClosingEntries(periodId);
-      setClosingEntries(entries);
-    } catch (error) {
-      console.error('Error al cargar asientos de cierre:', error);
-      setClosingEntries([]);
-    }
-  }
-  
-  async function handleClosePeriod() {
-    if (!user || !selectedPeriod || !periodData) return;
-    
-    if (!confirm(`¿Está seguro de cerrar el período "${periodData.name}"? Esta acción no se puede deshacer fácilmente.`)) {
-      return;
-    }
+  }, [activePeriod]);
+
+  // Generar asiento de cierre
+  const handleGenerateClosingEntry = async () => {
+    if (!activePeriod || !user) return;
     
     try {
-      setProcessing(true);
+      setProcessingAction(true);
       
-      const closingData: ClosingData = {
-        periodId: selectedPeriod,
-        userId: user.id,
-        date: periodData.end_date,
-        notes: `Cierre automático del período ${periodData.name}`
-      };
-      
-      const result = await generateClosingEntries(
-        closingData.periodId,
-        closingData.userId,
-        new Date(closingData.date),
-        closingData.notes
-      );
-      
-      if (result.success) {
-        toast.success(result.message);
+      // Verificar si ya existe un asiento de cierre
+      const { data: existingEntries, error: checkError } = await supabase
+        .from('journal_entries')
+        .select('id')
+        .eq('accounting_period_id', activePeriod.id)
+        .eq('is_closing_entry', true)
+        .limit(1);
         
-        // Actualizar datos
-        await fetchInitialData();
-        await fetchPeriodData(selectedPeriod);
-        await fetchClosingEntries(selectedPeriod);
-        
-        // Mostrar resumen del cierre
-        setTimeout(() => {
-          toast.info(`Resumen del cierre: Ingresos $${formatCurrency(result.totalIncome || 0)}, Gastos $${formatCurrency(result.totalExpenses || 0)}, Resultado Neto $${formatCurrency(result.netResult || 0)}`);
-        }, 1000);
-      } else {
-        toast.error(result.message);
+      if (checkError) throw checkError;
+      
+      if (existingEntries && existingEntries.length > 0) {
+        setClosingEntryId(existingEntries[0].id);
+        setClosingStep('review');
+        toast.info('Ya existe un asiento de cierre para este período');
+        return;
       }
-    } catch (error) {
+      
+      // Generar nuevo asiento de cierre
+      const closingEntry = await generateClosingEntry(activePeriod.id, user.id);
+      setClosingEntryId(closingEntry.id);
+      setClosingStep('review');
+      toast.success('Asiento de cierre generado correctamente');
+    } catch (error: any) {
+      console.error('Error al generar asiento de cierre:', error);
+      toast.error(`Error al generar el asiento de cierre: ${error.message || 'Error desconocido'}`);
+    } finally {
+      setProcessingAction(false);
+    }
+  };
+
+  // Aprobar asiento de cierre
+  const handleApproveClosingEntry = async () => {
+    if (!closingEntryId || !user) return;
+    
+    try {
+      setProcessingAction(true);
+      
+      // Aprobar el asiento de cierre
+      const { error } = await supabase
+        .from('journal_entries')
+        .update({
+          status: 'aprobado',
+          is_approved: true,
+          approved_by: user.id,
+          approved_at: new Date().toISOString()
+        })
+        .eq('id', closingEntryId);
+        
+      if (error) throw error;
+      
+      setClosingStep('close');
+      toast.success('Asiento de cierre aprobado correctamente');
+    } catch (error: any) {
+      console.error('Error al aprobar asiento de cierre:', error);
+      toast.error(`Error al aprobar el asiento de cierre: ${error.message || 'Error desconocido'}`);
+    } finally {
+      setProcessingAction(false);
+    }
+  };
+
+  // Cerrar período contable
+  const handleClosePeriod = async () => {
+    if (!activePeriod || !user) return;
+    
+    try {
+      setProcessingAction(true);
+      
+      // Cerrar el período
+      await closePeriod(activePeriod.id, user.id);
+      
+      // Crear siguiente período
+      const nextPeriod = await createNextPeriod(activePeriod.id, user.id);
+      setNextPeriodId(nextPeriod.id);
+      
+      // Generar asiento de apertura para el nuevo período
+      await generateOpeningEntry(activePeriod.id, nextPeriod.id, user.id);
+      
+      setClosingStep('complete');
+      toast.success('Período cerrado correctamente');
+    } catch (error: any) {
       console.error('Error al cerrar período:', error);
-      toast.error('Error al cerrar el período.');
+      toast.error(`Error al cerrar el período contable: ${error.message || 'Error desconocido'}`);
     } finally {
-      setProcessing(false);
+      setProcessingAction(false);
     }
-  }
-  
-  async function handleReopenPeriod() {
-    if (!user || !selectedPeriod || !periodData || !reopenReason.trim()) return;
+  };
+
+  // Renderizar paso actual
+  const renderCurrentStep = () => {
+    switch (closingStep) {
+      case 'check':
+        return renderCheckStep();
+      case 'generate':
+        return renderGenerateStep();
+      case 'review':
+        return renderReviewStep();
+      case 'close':
+        return renderCloseStep();
+      case 'complete':
+        return renderCompleteStep();
+      default:
+        return null;
+    }
+  };
+
+  // Paso 1: Verificar requisitos
+  const renderCheckStep = () => {
+    if (!closingStatus) return null;
     
-    try {
-      setProcessing(true);
-      
-      const result = await reopenAccountingPeriod(
-        selectedPeriod,
-        user.id,
-        reopenReason
-      );
-      
-      if (result.success) {
-        toast.success(result.message);
-        setShowReopenDialog(false);
-        setReopenReason('');
+    const isReady = closingStatus.isReady;
+    
+    return (
+      <div className="space-y-6">
+        <h3 className="text-lg font-medium text-gray-900">Verificación de Requisitos</h3>
         
-        // Actualizar datos
-        await fetchInitialData();
-        await fetchPeriodData(selectedPeriod);
-        await fetchClosingEntries(selectedPeriod);
-      } else {
-        toast.error(result.message);
-      }
-    } catch (error) {
-      console.error('Error al reabrir período:', error);
-      toast.error('Error al reabrir el período.');
-    } finally {
-      setProcessing(false);
-    }
-  }
-  
-  function toggleEntryDetails(entryId: string) {
-    setExpandedEntry(expandedEntry === entryId ? null : entryId);
-  }
-  
+        <div className="space-y-4">
+          <div className="flex items-center">
+            {isReady ? (
+              <CheckCircle className="h-5 w-5 text-green-500 mr-2" />
+            ) : (
+              <XCircle className="h-5 w-5 text-red-500 mr-2" />
+            )}
+            <span className="text-sm">
+              Todos los asientos deben estar balanceados
+            </span>
+          </div>
+          
+          {closingStatus.hasUnbalancedEntries && (
+            <div className="ml-7 text-xs text-red-500">
+              Hay {closingStatus.unbalancedEntries.length} asientos desbalanceados
+            </div>
+          )}
+          
+          <div className="flex items-start">
+            <AlertTriangle className="h-5 w-5 text-amber-500 mt-0.5 mr-2" />
+            <div>
+              <span className="text-sm">
+                Una vez cerrado el período, no se podrán modificar los asientos de este período
+              </span>
+              <p className="text-xs text-gray-500 mt-1">
+                El cierre es un proceso irreversible. Asegúrese de revisar todos los informes financieros antes de proceder.
+              </p>
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex justify-end mt-8">
+          <button
+            onClick={() => setClosingStep('generate')}
+            disabled={!isReady || processingAction}
+            className={`inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white ${
+              isReady && !processingAction ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'
+            } focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500`}
+          >
+            Continuar <ArrowRight className="ml-2 h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Paso 2: Generar asiento de cierre
+  const renderGenerateStep = () => {
+    return (
+      <div className="space-y-6">
+        <h3 className="text-lg font-medium text-gray-900">Generar Asiento de Cierre</h3>
+        
+        <div className="bg-blue-50 p-4 rounded-md">
+          <div className="flex">
+            <div className="flex-shrink-0">
+              <FileCheck className="h-5 w-5 text-blue-500" />
+            </div>
+            <div className="ml-3">
+              <h3 className="text-sm font-medium text-blue-800">
+                Generación del asiento de cierre
+              </h3>
+              <div className="mt-2 text-sm text-blue-700">
+                <p>
+                  Se generará un asiento contable para:
+                </p>
+                <ul className="list-disc pl-5 mt-1 space-y-1">
+                  <li>Cerrar las cuentas de ingresos</li>
+                  <li>Cerrar las cuentas de gastos</li>
+                  <li>Transferir el resultado a la cuenta de resultados</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex justify-between mt-8">
+          <button
+            onClick={() => setClosingStep('check')}
+            disabled={processingAction}
+            className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            Volver
+          </button>
+          
+          <button
+            onClick={handleGenerateClosingEntry}
+            disabled={processingAction}
+            className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            {processingAction ? (
+              <>
+                <Loader className="animate-spin mr-2 h-4 w-4" />
+                Generando...
+              </>
+            ) : (
+              <>
+                Generar Asiento de Cierre
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Paso 3: Revisar y aprobar asiento
+  const renderReviewStep = () => {
+    return (
+      <div className="space-y-6">
+        <h3 className="text-lg font-medium text-gray-900">Revisar Asiento de Cierre</h3>
+        
+        <div className="bg-white border border-gray-200 rounded-md overflow-hidden">
+          <div className="px-4 py-5 sm:px-6 bg-gray-50">
+            <h3 className="text-sm font-medium text-gray-900">
+              Asiento de Cierre
+            </h3>
+            <p className="mt-1 max-w-2xl text-xs text-gray-500">
+              Revise el asiento de cierre generado antes de aprobarlo.
+            </p>
+          </div>
+          <div className="px-4 py-5 sm:p-6">
+            {closingEntryId && (
+              <a 
+                href={`/journal?entry=${closingEntryId}`} 
+                target="_blank" 
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:text-blue-800 text-sm underline"
+              >
+                Ver asiento de cierre
+              </a>
+            )}
+            <p className="mt-2 text-sm text-gray-500">
+              Compruebe que las cuentas de ingresos y gastos han sido correctamente cerradas
+              y que el resultado se ha trasladado a la cuenta de resultados.
+            </p>
+          </div>
+        </div>
+        
+        <div className="flex justify-between mt-8">
+          <button
+            onClick={() => setClosingStep('generate')}
+            disabled={processingAction}
+            className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            Volver
+          </button>
+          
+          <button
+            onClick={handleApproveClosingEntry}
+            disabled={processingAction}
+            className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            {processingAction ? (
+              <>
+                <Loader className="animate-spin mr-2 h-4 w-4" />
+                Aprobando...
+              </>
+            ) : (
+              <>
+                Aprobar Asiento de Cierre
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Paso 4: Cerrar período
+  const renderCloseStep = () => {
+    return (
+      <div className="space-y-6">
+        <h3 className="text-lg font-medium text-gray-900">Cerrar Período</h3>
+        
+        <div className="bg-yellow-50 p-4 rounded-md">
+          <div className="flex">
+            <div className="flex-shrink-0">
+              <Lock className="h-5 w-5 text-yellow-400" />
+            </div>
+            <div className="ml-3">
+              <h3 className="text-sm font-medium text-yellow-800">
+                Cierre definitivo del período
+              </h3>
+              <div className="mt-2 text-sm text-yellow-700">
+                <p>
+                  Esta acción cerrará definitivamente el período contable 
+                  <strong> {activePeriod?.name}</strong> y creará un nuevo período activo.
+                </p>
+                <p className="mt-2">
+                  <strong>¡Atención!</strong> Una vez cerrado el período:
+                </p>
+                <ul className="list-disc pl-5 mt-1 space-y-1">
+                  <li>No se podrán modificar los asientos contables</li>
+                  <li>No se podrán añadir nuevos asientos</li>
+                  <li>No se podrá reabrir el período</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex justify-between mt-8">
+          <button
+            onClick={() => setClosingStep('review')}
+            disabled={processingAction}
+            className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            Volver
+          </button>
+          
+          <button
+            onClick={handleClosePeriod}
+            disabled={processingAction}
+            className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500"
+          >
+            {processingAction ? (
+              <>
+                <Loader className="animate-spin mr-2 h-4 w-4" />
+                Cerrando período...
+              </>
+            ) : (
+              <>
+                Cerrar Período Definitivamente
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Paso 5: Proceso completado
+  const renderCompleteStep = () => {
+    return (
+      <div className="text-center py-8">
+        <CheckCircle className="mx-auto h-12 w-12 text-green-500" />
+        <h3 className="mt-2 text-xl font-medium text-gray-900">
+          ¡Período cerrado correctamente!
+        </h3>
+        <p className="mt-2 text-sm text-gray-500">
+          El período contable ha sido cerrado y se ha creado un nuevo período activo.
+        </p>
+        <div className="mt-6 space-y-4">
+          <a 
+            href="/journal" 
+            className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            Ir al Diario
+          </a>
+          <br />
+          <a 
+            href="/financial-statements" 
+            className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            Ver Estados Financieros
+          </a>
+        </div>
+      </div>
+    );
+  };
+
+  // Renderizar pantalla de carga
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <Loader className="h-8 w-8 animate-spin text-blue-500" />
-        <span className="ml-2 text-gray-500">Cargando datos...</span>
+      <div className="flex justify-center items-center py-12">
+        <Loader className="h-8 w-8 text-blue-500 animate-spin" />
+        <span className="ml-2 text-gray-500">Cargando...</span>
       </div>
     );
   }
-  
+
+  // Renderizar error si no hay período activo
+  if (!activePeriod) {
+    return (
+      <div className="text-center py-12">
+        <Calendar className="mx-auto h-12 w-12 text-gray-400" />
+        <h3 className="mt-2 text-sm font-medium text-gray-900">No hay período activo</h3>
+        <p className="mt-1 text-sm text-gray-500">
+          No se encontró un período contable activo. Active un período para continuar.
+        </p>
+      </div>
+    );
+  }
+
   return (
-    <div className="px-4 sm:px-6 lg:px-8 py-8">
-      <div className="sm:flex sm:items-center">
-        <div className="sm:flex-auto">
-          <h1 className="text-2xl font-semibold text-gray-900">Proceso de Cierre Contable</h1>
-          <p className="mt-2 text-sm text-gray-700">
-            Gestione el cierre de períodos contables y visualice los asientos de cierre generados.
-          </p>
-        </div>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold text-gray-900">Proceso de Cierre Contable</h1>
       </div>
-      
-      <div className="mt-8 grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Panel de selección de período */}
-        <div className="lg:col-span-1">
-          <div className="bg-white shadow-sm rounded-lg overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-200">
-              <h3 className="text-lg font-medium text-gray-900">Períodos Contables</h3>
-            </div>
-            
-            <div className="divide-y divide-gray-200 max-h-[400px] overflow-y-auto">
-              {periods.length === 0 ? (
-                <div className="p-6 text-center">
-                  <p className="text-gray-500">No hay períodos disponibles</p>
-                </div>
-              ) : (
-                periods.map(period => (
-                  <div 
-                    key={period.id}
-                    className={`p-4 hover:bg-gray-50 cursor-pointer ${
-                      selectedPeriod === period.id ? 'bg-blue-50' : ''
-                    }`}
-                    onClick={() => setSelectedPeriod(period.id)}
-                  >
-                    <div className="flex justify-between">
-                      <h4 className="text-sm font-medium text-gray-900">{period.name}</h4>
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                        period.is_closed ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'
-                      }`}>
-                        {period.is_closed ? (
-                          <Lock className="h-3 w-3 mr-1" />
-                        ) : (
-                          <UnlockIcon className="h-3 w-3 mr-1" />
-                        )}
-                        {period.is_closed ? 'Cerrado' : 'Abierto'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-gray-500 mt-1">
-                      <Calendar className="h-3 w-3 inline mr-1" />
-                      {new Date(period.start_date).toLocaleDateString()} - {new Date(period.end_date).toLocaleDateString()}
-                    </p>
-                    {period.is_reopened && (
-                      <p className="text-xs text-amber-600 mt-1">
-                        <AlertTriangle className="h-3 w-3 inline mr-1" />
-                        Reabierto el {new Date(period.reopened_at).toLocaleDateString()}
-                      </p>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
+
+      {/* Información del período */}
+      <div className="bg-white shadow sm:rounded-lg">
+        <div className="px-4 py-5 sm:p-6">
+          <div className="mb-4">
+            <h3 className="text-lg leading-6 font-medium text-gray-900 flex items-center">
+              <Calendar className="h-5 w-5 mr-2" />
+              Período a cerrar: {activePeriod.name}
+            </h3>
+            <p className="mt-1 text-sm text-gray-500">
+              Desde {format(new Date(activePeriod.start_date), 'dd/MM/yyyy')} hasta {format(new Date(activePeriod.end_date), 'dd/MM/yyyy')}
+            </p>
           </div>
-        </div>
-        
-        {/* Panel de detalles y acciones */}
-        <div className="lg:col-span-2">
-          <div className="bg-white shadow-sm rounded-lg">
-            {!selectedPeriod ? (
-              <div className="p-6 text-center">
-                <p className="text-gray-500">Seleccione un período para ver sus detalles</p>
-              </div>
-            ) : !periodData ? (
-              <div className="p-6 text-center">
-                <Loader className="h-8 w-8 animate-spin text-blue-500 mx-auto mb-2" />
-                <p className="text-gray-500">Cargando detalles del período...</p>
-              </div>
-            ) : (
-              <div>
-                <div className="border-b border-gray-200 bg-gray-50 px-4 py-3">
-                  <h3 className="text-lg font-medium text-gray-900">
-                    {periodData.name}
-                    <span className={`ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                      periodData.is_closed ? 'bg-red-100 text-red-800' : 'bg-green-100 text-green-800'
-                    }`}>
-                      {periodData.is_closed ? 'Cerrado' : 'Abierto'}
-                    </span>
-                  </h3>
+
+          {/* Indicador de paso actual */}
+          <div className="border-b border-gray-200 pb-5">
+            <div className="mt-4 flex items-center justify-between">
+              <div className="flex items-center space-x-5">
+                <div className={`flex items-center ${closingStep === 'check' ? 'text-blue-600' : (closingStep === 'generate' || closingStep === 'review' || closingStep === 'close' || closingStep === 'complete') ? 'text-green-500' : 'text-gray-400'}`}>
+                  <div className={`flex-shrink-0 h-5 w-5 rounded-full border-2 ${closingStep === 'check' ? 'border-blue-600' : (closingStep === 'generate' || closingStep === 'review' || closingStep === 'close' || closingStep === 'complete') ? 'border-green-500 bg-green-500' : 'border-gray-400'} flex items-center justify-center`}>
+                    {(closingStep === 'generate' || closingStep === 'review' || closingStep === 'close' || closingStep === 'complete') && <CheckCircle className="h-3 w-3 text-white" />}
+                  </div>
+                  <span className="ml-2 text-xs font-medium">Verificación</span>
                 </div>
                 
-                <div className="px-4 py-5 sm:p-6">
-                  {/* Información del período */}
-                  <div className="space-y-3">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                      <div>
-                        <h4 className="text-sm font-medium text-gray-500">Fechas</h4>
-                        <p className="mt-1 text-sm text-gray-900">
-                          {new Date(periodData.start_date).toLocaleDateString()} - {new Date(periodData.end_date).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <div>
-                        <h4 className="text-sm font-medium text-gray-500">Estado</h4>
-                        <p className="mt-1 text-sm text-gray-900">
-                          {periodData.is_closed ? (
-                            <span className="text-red-600">Cerrado el {new Date(periodData.closed_at).toLocaleDateString()}</span>
-                          ) : (
-                            <span className="text-green-600">Abierto</span>
-                          )}
-                        </p>
-                      </div>
-                    </div>
-                    
-                    {/* Estado de cierre */}
-                    {!periodData.is_closed && closingStatus && (
-                      <div className={`mt-4 p-4 rounded-md ${
-                        closingStatus.ready ? 'bg-green-50 border border-green-200' : 'bg-yellow-50 border border-yellow-200'
-                      }`}>
-                        <div className="flex">
-                          <div className="flex-shrink-0">
-                            {closingStatus.ready ? (
-                              <FileCheck className="h-5 w-5 text-green-400" />
-                            ) : (
-                              <AlertTriangle className="h-5 w-5 text-yellow-400" />
-                            )}
-                          </div>
-                          <div className="ml-3">
-                            <h3 className={`text-sm font-medium ${closingStatus.ready ? 'text-green-800' : 'text-yellow-800'}`}>
-                              {closingStatus.ready ? 'Listo para cerrar' : 'No está listo para cerrar'}
-                            </h3>
-                            <div className="mt-2 text-sm text-gray-700">
-                              <p>{closingStatus.message}</p>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                    
-                    {/* Información financiera resumida (si está cerrado) */}
-                    {periodData.is_closed && periodData.financialData && (
-                      <div className="mt-6 border-t border-gray-200 pt-6">
-                        <h3 className="text-lg font-medium text-gray-900 mb-4">Resumen Financiero</h3>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                          <div className="bg-blue-50 p-4 rounded-md">
-                            <h4 className="text-sm font-medium text-blue-900 flex items-center">
-                              <BarChart className="h-4 w-4 mr-1" />
-                              Ingresos
-                            </h4>
-                            <p className="mt-2 text-xl font-semibold text-blue-600">
-                              ${formatCurrency(periodData.financialData.income_statement?.totalIncome || 0)}
-                            </p>
-                          </div>
-                          <div className="bg-red-50 p-4 rounded-md">
-                            <h4 className="text-sm font-medium text-red-900 flex items-center">
-                              <ArrowRightCircle className="h-4 w-4 mr-1" />
-                              Gastos
-                            </h4>
-                            <p className="mt-2 text-xl font-semibold text-red-600">
-                              ${formatCurrency(periodData.financialData.income_statement?.totalExpense || 0)}
-                            </p>
-                          </div>
-                          <div className="bg-green-50 p-4 rounded-md">
-                            <h4 className="text-sm font-medium text-green-900 flex items-center">
-                              <Banknote className="h-4 w-4 mr-1" />
-                              Resultado
-                            </h4>
-                            <p className="mt-2 text-xl font-semibold text-green-600">
-                              ${formatCurrency(periodData.financialData.income_statement?.netIncome || 0)}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
+                <div className={`flex items-center ${closingStep === 'generate' ? 'text-blue-600' : (closingStep === 'review' || closingStep === 'close' || closingStep === 'complete') ? 'text-green-500' : 'text-gray-400'}`}>
+                  <div className={`flex-shrink-0 h-5 w-5 rounded-full border-2 ${closingStep === 'generate' ? 'border-blue-600' : (closingStep === 'review' || closingStep === 'close' || closingStep === 'complete') ? 'border-green-500 bg-green-500' : 'border-gray-400'} flex items-center justify-center`}>
+                    {(closingStep === 'review' || closingStep === 'close' || closingStep === 'complete') && <CheckCircle className="h-3 w-3 text-white" />}
                   </div>
-                  
-                  {/* Acciones de cierre/reapertura */}
-                  <div className="mt-8 flex justify-end">
-                    {periodData.is_closed ? (
-                      <button
-                        type="button"
-                        onClick={() => setShowReopenDialog(true)}
-                        disabled={processing}
-                        className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500 disabled:opacity-75"
-                      >
-                        {processing ? (
-                          <>
-                            <Loader className="h-4 w-4 animate-spin mr-2" />
-                            Procesando...
-                          </>
-                        ) : (
-                          <>
-                            <UnlockIcon className="h-4 w-4 mr-2" />
-                            Reabrir Período
-                          </>
-                        )}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={handleClosePeriod}
-                        disabled={processing || !closingStatus?.ready}
-                        className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-75"
-                      >
-                        {processing ? (
-                          <>
-                            <Loader className="h-4 w-4 animate-spin mr-2" />
-                            Procesando...
-                          </>
-                        ) : (
-                          <>
-                            <Lock className="h-4 w-4 mr-2" />
-                            Cerrar Período
-                          </>
-                        )}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-          
-          {/* Asientos de cierre */}
-          {selectedPeriod && closingEntries.length > 0 && (
-            <div className="mt-8 bg-white shadow-sm rounded-lg overflow-hidden">
-              <div className="px-4 py-3 border-b border-gray-200">
-                <h3 className="text-lg font-medium text-gray-900">Asientos de Cierre</h3>
-              </div>
-              
-              <div className="divide-y divide-gray-200">
-                {closingEntries.map(entry => (
-                  <div key={entry.id} className="p-4">
-                    <div 
-                      className="flex justify-between items-center cursor-pointer"
-                      onClick={() => toggleEntryDetails(entry.id)}
-                    >
-                      <div>
-                        <h4 className="text-sm font-medium text-gray-900">{entry.description}</h4>
-                        <p className="text-xs text-gray-500 mt-1">
-                          <Clock className="h-3 w-3 inline mr-1" />
-                          {new Date(entry.date).toLocaleDateString()}
-                        </p>
-                      </div>
-                      <div className="flex items-center">
-                        <span className="mr-4 text-sm text-gray-700">
-                          ${formatCurrency(entry.total_debit)}
-                        </span>
-                        {expandedEntry === entry.id ? (
-                          <ChevronUp className="h-5 w-5 text-gray-400" />
-                        ) : (
-                          <ChevronDown className="h-5 w-5 text-gray-400" />
-                        )}
-                      </div>
-                    </div>
-                    
-                    {expandedEntry === entry.id && (
-                      <div className="mt-4 bg-gray-50 p-4 rounded-md">
-                        <div className="divide-y divide-gray-200">
-                          {entry.items.map((item: any) => (
-                            <div key={item.id} className="py-3 flex justify-between">
-                              <div className="flex-1">
-                                <p className="text-sm font-medium text-gray-900">
-                                  {item.account?.code} - {item.account?.name}
-                                </p>
-                                <p className="text-xs text-gray-500">{item.description}</p>
-                              </div>
-                              <div className="flex space-x-6">
-                                <div className="text-sm">
-                                  <span className="text-gray-500">Débito:</span>
-                                  <span className={`ml-1 ${parseFloat(item.debit) > 0 ? 'text-blue-600 font-medium' : 'text-gray-400'}`}>
-                                    ${formatCurrency(item.debit)}
-                                  </span>
-                                </div>
-                                <div className="text-sm">
-                                  <span className="text-gray-500">Crédito:</span>
-                                  <span className={`ml-1 ${parseFloat(item.credit) > 0 ? 'text-green-600 font-medium' : 'text-gray-400'}`}>
-                                    ${formatCurrency(item.credit)}
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                        
-                        <div className="mt-3 pt-3 border-t border-gray-200 flex justify-end">
-                          <div className="text-sm font-medium space-x-6">
-                            <span>
-                              <span className="text-gray-500">Total Débito:</span>
-                              <span className="ml-1 text-blue-600">${formatCurrency(entry.total_debit)}</span>
-                            </span>
-                            <span>
-                              <span className="text-gray-500">Total Crédito:</span>
-                              <span className="ml-1 text-green-600">${formatCurrency(entry.total_credit)}</span>
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-      
-      {/* Modal para reapertura de período */}
-      {showReopenDialog && (
-        <div className="fixed z-10 inset-0 overflow-y-auto">
-          <div className="flex items-center justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-            <div className="fixed inset-0 transition-opacity" aria-hidden="true">
-              <div className="absolute inset-0 bg-gray-500 opacity-75"></div>
-            </div>
-            
-            <div className="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
-              <div className="px-4 py-3 border-b border-gray-200 flex justify-between items-center">
-                <h3 className="text-lg font-medium text-gray-900">Reabrir Período Contable</h3>
-                <button
-                  type="button"
-                  onClick={() => setShowReopenDialog(false)}
-                  className="text-gray-400 hover:text-gray-500"
-                >
-                  <span className="sr-only">Cerrar</span>
-                  &times;
-                </button>
-              </div>
-              
-              <div className="p-6 space-y-4">
-                <div className="bg-yellow-50 border border-yellow-200 rounded-md p-4">
-                  <div className="flex">
-                    <div className="flex-shrink-0">
-                      <AlertTriangle className="h-5 w-5 text-yellow-400" />
-                    </div>
-                    <div className="ml-3">
-                      <h3 className="text-sm font-medium text-yellow-800">
-                        Advertencia
-                      </h3>
-                      <div className="mt-2 text-sm text-yellow-700">
-                        <p>
-                          Reabrir un período contable eliminará todos los asientos de cierre generados.
-                          Esta acción debe realizarse solo en casos excepcionales y podría requerir
-                          una justificación para fines de auditoría.
-                        </p>
-                      </div>
-                    </div>
-                  </div>
+                  <span className="ml-2 text-xs font-medium">Asiento</span>
                 </div>
                 
-                <div>
-                  <label htmlFor="reopen-reason" className="block text-sm font-medium text-gray-700">
-                    Motivo de reapertura <span className="text-red-500">*</span>
-                  </label>
-                  <textarea
-                    id="reopen-reason"
-                    value={reopenReason}
-                    onChange={(e) => setReopenReason(e.target.value)}
-                    rows={3}
-                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-                    placeholder="Indique el motivo por el cual necesita reabrir este período"
-                    required
-                  />
+                <div className={`flex items-center ${closingStep === 'review' ? 'text-blue-600' : (closingStep === 'close' || closingStep === 'complete') ? 'text-green-500' : 'text-gray-400'}`}>
+                  <div className={`flex-shrink-0 h-5 w-5 rounded-full border-2 ${closingStep === 'review' ? 'border-blue-600' : (closingStep === 'close' || closingStep === 'complete') ? 'border-green-500 bg-green-500' : 'border-gray-400'} flex items-center justify-center`}>
+                    {(closingStep === 'close' || closingStep === 'complete') && <CheckCircle className="h-3 w-3 text-white" />}
+                  </div>
+                  <span className="ml-2 text-xs font-medium">Revisión</span>
                 </div>
-              </div>
-              
-              <div className="px-4 py-3 bg-gray-50 text-right sm:px-6">
-                <button
-                  type="button"
-                  onClick={() => setShowReopenDialog(false)}
-                  className="inline-flex justify-center py-2 px-4 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 mr-2"
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  onClick={handleReopenPeriod}
-                  disabled={processing || !reopenReason.trim()}
-                  className="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500 disabled:opacity-75"
-                >
-                  {processing ? (
-                    <>
-                      <Loader className="h-4 w-4 animate-spin mr-2" />
-                      Procesando...
-                    </>
-                  ) : (
-                    'Reabrir Período'
-                  )}
-                </button>
+                
+                <div className={`flex items-center ${closingStep === 'close' ? 'text-blue-600' : closingStep === 'complete' ? 'text-green-500' : 'text-gray-400'}`}>
+                  <div className={`flex-shrink-0 h-5 w-5 rounded-full border-2 ${closingStep === 'close' ? 'border-blue-600' : closingStep === 'complete' ? 'border-green-500 bg-green-500' : 'border-gray-400'} flex items-center justify-center`}>
+                    {closingStep === 'complete' && <CheckCircle className="h-3 w-3 text-white" />}
+                  </div>
+                  <span className="ml-2 text-xs font-medium">Cierre</span>
+                </div>
               </div>
             </div>
           </div>
+
+          {/* Contenido del paso actual */}
+          <div className="mt-6">
+            {renderCurrentStep()}
+          </div>
         </div>
-      )}
+      </div>
     </div>
   );
 } 

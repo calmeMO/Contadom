@@ -1,51 +1,56 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
-  Filter, 
+  Book, 
   Search, 
-  ChevronDown, 
-  ChevronRight, 
-  FileText, 
-  Download,
-  Loader,
-  AlertCircle,
-  Calendar,
-  ArrowDown,
-  Copy,
+  Filter, 
+  FileDown, 
+  Calendar, 
+  ArrowDownUp, 
+  RefreshCw, 
+  AlertCircle, 
   Printer,
-  RefreshCw
+  ChevronDown as ChevronDownIcon, 
+  ChevronRight as ChevronRightIcon,
+  MoreHorizontal,
+  X,
+  ListFilter
 } from 'lucide-react';
-import { supabase } from '../lib/supabase';
-import { toast } from 'react-toastify';
-import { format, addMonths, startOfMonth, endOfMonth } from 'date-fns';
+import { format, parseISO, startOfMonth, endOfMonth } from 'date-fns';
 import { es } from 'date-fns/locale';
+import { toast } from 'react-toastify';
+import { supabase } from '../lib/supabase';
 import * as XLSX from 'xlsx';
+import Decimal from 'decimal.js';
 import { 
+  fetchLedgerData, 
   LedgerAccount, 
   FormattedMovement,
-  fetchLedgerData,
   getAccountNature
 } from '../services/ledgerService';
-import { fetchAccounts } from '../services/accountService';
-import { Account } from '../services/accountService';
+import { fetchAccounts, Account } from '../services/accountService';
 
 export function Ledger() {
+  // Estados
   const [loading, setLoading] = useState(true);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedAccountId, setSelectedAccountId] = useState<string>('');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
   const [ledgerData, setLedgerData] = useState<LedgerAccount[]>([]);
+  const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [accountTypes, setAccountTypes] = useState<string[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
   const [expanded, setExpanded] = useState(false);
   const [showZeroBalances, setShowZeroBalances] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [dataLoaded, setDataLoaded] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
 
+  // Efectos
   useEffect(() => {
     loadAccounts();
-    // Establecer el mes actual por defecto
+    
+    // Establecer fecha por defecto al mes actual
     const today = new Date();
     const firstDay = startOfMonth(today);
     const lastDay = endOfMonth(today);
@@ -59,12 +64,27 @@ export function Ledger() {
       // Extraer tipos de cuenta únicos
       const types = [...new Set(accounts.map(account => account.type))];
       setAccountTypes(types);
-      // Por defecto, seleccionar todos los tipos
+      // Seleccionar todos por defecto
       setSelectedTypes(types);
     }
   }, [accounts]);
 
-  // Carga inicial de cuentas
+  // Cargar los datos del libro mayor cuando cambien los filtros relevantes
+  useEffect(() => {
+    if (accounts.length > 0) {
+      loadLedgerData();
+    }
+  }, [
+    accounts,
+    startDate,
+    endDate,
+    selectedAccountId,
+    selectedTypes,
+    searchTerm,
+    showZeroBalances
+  ]);
+
+  // Funciones
   async function loadAccounts() {
     try {
       setLoading(true);
@@ -78,10 +98,8 @@ export function Ledger() {
     }
   }
 
-  // Cargar datos del libro mayor
   const loadLedgerData = useCallback(async () => {
     if (!startDate || !endDate) {
-      // Solo mostrar el mensaje si no estamos en la carga inicial
       if (dataLoaded) {
         toast.warn('Debe seleccionar un rango de fechas');
       }
@@ -98,7 +116,7 @@ export function Ledger() {
         accountTypes: selectedTypes
       });
       
-      // Si hay una cuenta específica seleccionada
+      // Filtrar por cuenta seleccionada si existe
       if (selectedAccountId) {
         const filteredData = data.filter(item => item.accountId === selectedAccountId);
         setLedgerData(filteredData);
@@ -133,14 +151,8 @@ export function Ledger() {
     dataLoaded
   ]);
 
-  useEffect(() => {
-    if (accounts.length > 0) {
-      loadLedgerData();
-    }
-  }, [loadLedgerData, accounts]);
-
-  // Funciones auxiliares
-  function getAccountTypeLabel(type: string) {
+  // Función para obtener la etiqueta del tipo de cuenta
+  function getAccountTypeLabel(type: string): string {
     const types: Record<string, string> = {
       activo: 'Activos',
       pasivo: 'Pasivos',
@@ -149,7 +161,6 @@ export function Ledger() {
       gasto: 'Gastos',
       costo: 'Costos',
       cuenta_orden: 'Cuentas de Orden',
-      // Mantener compatibilidad con tipos antiguos
       asset: 'Activos',
       liability: 'Pasivos',
       equity: 'Patrimonio',
@@ -159,7 +170,8 @@ export function Ledger() {
     return types[type] || type;
   }
 
-  function formatCurrency(amount: number) {
+  // Función para formatear moneda
+  function formatCurrency(amount: number): string {
     return amount.toLocaleString('es-DO', { 
       style: 'currency', 
       currency: 'DOP',
@@ -167,8 +179,8 @@ export function Ledger() {
     });
   }
 
-  // Expandir/colapsar una cuenta
-  function handleAccountExpand(accountId: string) {
+  // Expandir/colapsar una cuenta específica
+  function handleAccountExpand(accountId: string): void {
     setLedgerData(prevData => 
       prevData.map(item => 
         item.accountId === accountId 
@@ -179,7 +191,7 @@ export function Ledger() {
   }
 
   // Expandir/colapsar todas las cuentas
-  function handleExpandAll() {
+  function handleExpandAll(): void {
     const newExpandedState = !expanded;
     setExpanded(newExpandedState);
     setLedgerData(prevData => 
@@ -187,14 +199,14 @@ export function Ledger() {
     );
   }
 
-  // Aplicar búsqueda
-  function handleSearch(e: React.FormEvent) {
+  // Manejar la búsqueda
+  function handleSearch(e: React.FormEvent): void {
     e.preventDefault();
     loadLedgerData();
   }
 
   // Resetear filtros
-  function resetFilters() {
+  function resetFilters(): void {
     setSearchTerm('');
     setSelectedAccountId('');
     setSelectedTypes(accountTypes);
@@ -207,30 +219,30 @@ export function Ledger() {
   }
 
   // Cambiar mes
-  function changeMonth(direction: 'prev' | 'next') {
+  function changeMonth(direction: 'prev' | 'next'): void {
     try {
       const currentStart = new Date(startDate);
       const currentEnd = new Date(endDate);
       
       const offset = direction === 'prev' ? -1 : 1;
-      const newStart = startOfMonth(addMonths(currentStart, offset));
-      const newEnd = endOfMonth(addMonths(currentEnd, offset));
+      const newStart = startOfMonth(new Date(currentStart.setMonth(currentStart.getMonth() + offset)));
+      const newEnd = endOfMonth(new Date(currentEnd.setMonth(currentEnd.getMonth() + offset)));
       
-      setStartDate(formatSafeDate(newStart, 'yyyy-MM-dd'));
-      setEndDate(formatSafeDate(newEnd, 'yyyy-MM-dd'));
+      setStartDate(format(newStart, 'yyyy-MM-dd'));
+      setEndDate(format(newEnd, 'yyyy-MM-dd'));
     } catch (error) {
       console.error('Error al cambiar mes:', error);
       toast.error('Error al cambiar el período');
     }
   }
 
-  // Exportar a PDF (usando la función de impresión del navegador)
-  function printLedger() {
+  // Imprimir libro mayor
+  function printLedger(): void {
     window.print();
   }
 
   // Exportar a Excel
-  async function exportToExcel() {
+  async function exportToExcel(): Promise<void> {
     try {
       setIsExporting(true);
       
@@ -239,8 +251,8 @@ export function Ledger() {
       
       // Datos para el encabezado
       const headerData = [
-        [`LIBRO MAYOR - ${startDate ? formatSafeDate(startDate, "MMMM yyyy", { locale: es }).toUpperCase() : ''}`],
-        [`Período: ${startDate ? formatSafeDate(startDate, "dd/MM/yyyy") : ''} - ${endDate ? formatSafeDate(endDate, "dd/MM/yyyy") : ''}`],
+        [`LIBRO MAYOR - ${startDate ? format(new Date(startDate), "MMMM yyyy", { locale: es }).toUpperCase() : ''}`],
+        [`Período: ${startDate ? format(new Date(startDate), "dd/MM/yyyy") : ''} - ${endDate ? format(new Date(endDate), "dd/MM/yyyy") : ''}`],
         [], // Fila vacía
       ];
       
@@ -250,50 +262,44 @@ export function Ledger() {
       // Agregar filas de encabezado
       headerData.forEach(row => excelData.push(row));
       
-      // Encabezados de la tabla
+      // Agregar cabeceras de columnas
       excelData.push([
-        'Código', 
-        'Cuenta', 
-        'Saldo Inicial', 
-        'Débitos', 
-        'Créditos', 
+        'Código',
+        'Cuenta',
+        'Saldo Inicial',
+        'Débitos',
+        'Créditos',
         'Saldo Final'
       ]);
       
-      // Datos de las cuentas
-      ledgerData.forEach(ledgerAccount => {
-        const { account, initialBalance, totalDebit, totalCredit, finalBalance } = ledgerAccount;
-        const accountNature = getAccountNature(account);
-        
-        // Indentación para mostrar jerarquía
-        const indentation = '  '.repeat(ledgerAccount.level - 1);
-        
-        // Agregar fila para la cuenta
+      // Agregar datos de cuentas
+      ledgerData.forEach(account => {
+        // Agregar la fila de la cuenta
         excelData.push([
-          account.code,
-          indentation + account.name,
-          initialBalance,
-          totalDebit,
-          totalCredit,
-          finalBalance
+          account.account.code,
+          account.account.name,
+          account.initialBalance,
+          account.totalDebit,
+          account.totalCredit,
+          account.finalBalance
         ]);
         
-        // Si la cuenta está expandida, agregar los movimientos
-        if (ledgerAccount.expanded && ledgerAccount.movements.length > 0) {
-          // Encabezados de movimientos
+        // Si la cuenta tiene movimientos, agregar detalle
+        if (account.movements.length > 0 && account.expanded) {
+          // Agregar cabeceras de movimientos
           excelData.push([
-            'Fecha', 
-            'Nº Asiento', 
-            'Descripción', 
-            'Débito', 
-            'Crédito', 
+            'Fecha',
+            'Asiento',
+            'Descripción',
+            'Débito',
+            'Crédito',
             'Saldo'
           ]);
           
-          // Movimientos
-          ledgerAccount.movements.forEach(movement => {
+          // Agregar movimientos
+          account.movements.forEach(movement => {
             excelData.push([
-              movement.date ? formatSafeDate(movement.date, 'dd/MM/yyyy') : '',
+              movement.date,
               movement.entry_number,
               movement.description,
               movement.debit,
@@ -302,58 +308,55 @@ export function Ledger() {
             ]);
           });
           
-          // Agregar fila vacía después de los movimientos
+          // Agregar fila en blanco después de los movimientos
           excelData.push([]);
         }
       });
       
-      // Crear hoja
+      // Crear hoja y agregarla al libro
       const ws = XLSX.utils.aoa_to_sheet(excelData);
-      
-      // Agregar hoja al workbook
       XLSX.utils.book_append_sheet(wb, ws, 'Libro Mayor');
       
-      // Generar el archivo
-      XLSX.writeFile(wb, `Libro_Mayor_${startDate ? formatSafeDate(startDate, 'yyyy-MM') : formatSafeDate(new Date(), 'yyyy-MM')}.xlsx`);
+      // Guardar archivo
+      XLSX.writeFile(wb, `LibroMayor_${format(new Date(startDate), 'yyyy-MM-dd')}_${format(new Date(endDate), 'yyyy-MM-dd')}.xlsx`);
       
-      toast.success('Libro Mayor exportado con éxito');
+      toast.success('Archivo exportado exitosamente');
     } catch (error) {
       console.error('Error exportando a Excel:', error);
-      toast.error('Error al exportar el Libro Mayor');
+      toast.error('Error al exportar a Excel');
     } finally {
       setIsExporting(false);
     }
   }
 
   // Exportar a CSV
-  async function exportToCSV() {
+  async function exportToCSV(): Promise<void> {
     try {
       setIsExporting(true);
       
+      // Preparar datos para CSV
       let csvContent = "data:text/csv;charset=utf-8,";
       
-      // Encabezados
+      // Agregar encabezados
+      csvContent += `LIBRO MAYOR - ${startDate ? format(new Date(startDate), "MMMM yyyy", { locale: es }).toUpperCase() : ''}\n`;
+      csvContent += `Período: ${startDate ? format(new Date(startDate), "dd/MM/yyyy") : ''} - ${endDate ? format(new Date(endDate), "dd/MM/yyyy") : ''}\n\n`;
+      
+      // Cabeceras de columnas
       csvContent += "Código,Cuenta,Saldo Inicial,Débitos,Créditos,Saldo Final\n";
       
-      // Datos de las cuentas
-      ledgerData.forEach(ledgerAccount => {
-        const { account, initialBalance, totalDebit, totalCredit, finalBalance } = ledgerAccount;
+      // Datos de cuentas
+      ledgerData.forEach(account => {
+        // Fila de la cuenta
+        csvContent += `${account.account.code},"${account.account.name}",${account.initialBalance},${account.totalDebit},${account.totalCredit},${account.finalBalance}\n`;
         
-        // Indentación para mostrar jerarquía
-        const indentation = '"' + ' '.repeat(ledgerAccount.level * 2) + '"';
-        
-        // Agregar fila para la cuenta
-        csvContent += `${account.code},${indentation}${account.name},${initialBalance},${totalDebit},${totalCredit},${finalBalance}\n`;
-        
-        // Si la cuenta tiene movimientos y está expandida, agregar los movimientos
-        if (ledgerAccount.expanded && ledgerAccount.movements.length > 0) {
-          // Encabezados de movimientos
-          csvContent += "Fecha,Nº Asiento,Descripción,Débito,Crédito,Saldo\n";
+        // Si la cuenta tiene movimientos, agregar detalle
+        if (account.movements.length > 0 && account.expanded) {
+          // Cabeceras de movimientos
+          csvContent += "Fecha,Asiento,Descripción,Débito,Crédito,Saldo\n";
           
           // Movimientos
-          ledgerAccount.movements.forEach(movement => {
-            const fecha = movement.date ? formatSafeDate(movement.date, 'dd/MM/yyyy') : '';
-            csvContent += `${fecha},${movement.entry_number},"${movement.description}",${movement.debit},${movement.credit},${movement.balance}\n`;
+          account.movements.forEach(movement => {
+            csvContent += `${movement.date},${movement.entry_number},"${movement.description}",${movement.debit},${movement.credit},${movement.balance}\n`;
           });
           
           // Línea en blanco
@@ -361,398 +364,468 @@ export function Ledger() {
         }
       });
       
-      // Crear enlace para descargar
+      // Crear enlace y descargar
       const encodedUri = encodeURI(csvContent);
       const link = document.createElement("a");
       link.setAttribute("href", encodedUri);
-      link.setAttribute("download", `Libro_Mayor_${startDate ? formatSafeDate(startDate, 'yyyy-MM') : formatSafeDate(new Date(), 'yyyy-MM')}.csv`);
+      link.setAttribute("download", `LibroMayor_${format(new Date(startDate), 'yyyy-MM-dd')}_${format(new Date(endDate), 'yyyy-MM-dd')}.csv`);
       document.body.appendChild(link);
-      
-      // Descargar
       link.click();
       document.body.removeChild(link);
       
-      toast.success('Libro Mayor exportado con éxito');
+      toast.success('Archivo CSV exportado exitosamente');
     } catch (error) {
       console.error('Error exportando a CSV:', error);
-      toast.error('Error al exportar el Libro Mayor');
+      toast.error('Error al exportar a CSV');
     } finally {
       setIsExporting(false);
     }
   }
 
-  // Corregir la función formatSafeDate para que acepte tanto string como Date
+  // Formatear fecha de manera segura
   function formatSafeDate(date: string | Date, formatStr: string, options?: any): string {
     try {
-      // Si date ya es un objeto Date, usarlo directamente
+      if (!date) return '';
       const dateObj = typeof date === 'string' ? new Date(date) : date;
-      
-      // Verificar si la fecha es válida
-      if (isNaN(dateObj.getTime())) {
-        return ''; // Devolver string vacío si la fecha no es válida
-      }
-      return format(dateObj, formatStr, options);
+      return format(dateObj, formatStr, options || {});
     } catch (error) {
-      console.error('Error al formatear fecha:', error);
+      console.error('Error formateando fecha:', error);
       return '';
     }
   }
 
+  // Calcular totales
+  const totals = useMemo(() => {
+    if (!ledgerData.length) return { initialBalance: 0, debit: 0, credit: 0, finalBalance: 0 };
+    
+    return ledgerData.reduce((acc, account) => {
+      return {
+        initialBalance: new Decimal(acc.initialBalance).plus(account.initialBalance).toNumber(),
+        debit: new Decimal(acc.debit).plus(account.totalDebit).toNumber(),
+        credit: new Decimal(acc.credit).plus(account.totalCredit).toNumber(),
+        finalBalance: new Decimal(acc.finalBalance).plus(account.finalBalance).toNumber(),
+      };
+    }, { initialBalance: 0, debit: 0, credit: 0, finalBalance: 0 });
+  }, [ledgerData]);
+
+  // Renderizar
   return (
-    <div className="container px-4 mx-auto print:w-full print:max-w-none">
-      <div className="flex flex-col mb-6 print:hidden">
-        <h1 className="text-2xl font-bold mb-6">Libro Mayor</h1>
+    <div className="container mx-auto px-4 py-6 animate-fadeIn">
+      {/* Encabezado */}
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6">
+        <div className="flex items-center mb-4 sm:mb-0">
+          <Book className="h-6 w-6 mr-2 text-primary" />
+          <h1 className="text-2xl font-bold text-gray-800">Libro Mayor</h1>
+        </div>
         
-        {/* Panel de filtros */}
-        <div className="bg-white p-4 rounded-lg shadow mb-6">
-          <div className="flex items-center mb-4">
-            <Filter className="h-5 w-5 mr-2 text-gray-600" />
-            <h2 className="text-lg font-semibold">Filtros</h2>
+        <div className="flex flex-wrap gap-2 print:hidden">
+          <button 
+            className="btn-icon btn-secondary"
+            onClick={() => setShowFilters(!showFilters)}
+            title="Mostrar/ocultar filtros"
+          >
+            {showFilters ? <X size={18} /> : <Filter size={18} />}
+          </button>
+          
+          <button 
+            className="btn-icon btn-secondary" 
+            onClick={resetFilters}
+            title="Restablecer filtros"
+          >
+            <RefreshCw size={18} />
+          </button>
+          
+          <button 
+            className="btn-icon btn-secondary" 
+            onClick={printLedger}
+            title="Imprimir"
+          >
+            <Printer size={18} />
+          </button>
+          
+          <div className="dropdown dropdown-end">
+            <label tabIndex={0} className="btn-icon btn-secondary">
+              <FileDown size={18} />
+            </label>
+            <ul tabIndex={0} className="dropdown-content z-10 menu p-2 shadow bg-base-100 rounded-box w-52">
+              <li><button onClick={exportToExcel} disabled={isExporting}>Exportar a Excel</button></li>
+              <li><button onClick={exportToCSV} disabled={isExporting}>Exportar a CSV</button></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      
+      {/* Controles de fecha */}
+      <div className="flex flex-col sm:flex-row items-center gap-2 mb-4 print:hidden">
+        <div className="flex items-center bg-base-200 p-2 rounded-lg w-full sm:w-auto">
+          <button
+            className="btn-icon btn-sm btn-ghost"
+            onClick={() => changeMonth('prev')}
+            title="Mes anterior"
+          >
+            <ChevronLeft width={18} height={18} className="mr-2" />
+          </button>
+          
+          <div className="flex items-center mx-2">
+            <Calendar className="mr-2 h-4 w-4 text-gray-500" />
+            <span className="font-medium">
+              {startDate ? formatSafeDate(startDate, "MMMM yyyy", { locale: es }) : 'Seleccione un período'}
+            </span>
+          </div>
+          
+          <button
+            className="btn-icon btn-sm btn-ghost"
+            onClick={() => changeMonth('next')}
+            title="Mes siguiente"
+          >
+            <ChevronRight width={18} height={18} className="ml-2" />
+          </button>
+        </div>
+        
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <input
+            type="date"
+            className="input input-bordered input-sm w-full"
+            value={startDate}
+            onChange={(e) => setStartDate(e.target.value)}
+          />
+          <span>a</span>
+          <input
+            type="date"
+            className="input input-bordered input-sm w-full"
+            value={endDate}
+            onChange={(e) => setEndDate(e.target.value)}
+          />
+        </div>
+      </div>
+      
+      {/* Panel de filtros */}
+      {showFilters && (
+        <div className="mb-4 p-4 bg-base-200 rounded-lg animate-fadeIn print:hidden">
+          <div className="text-sm font-medium mb-2 flex items-center">
+            <ListFilter className="mr-1 w-4 h-4" />
+            Filtros
           </div>
           
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Selector de fechas */}
-            <div className="flex flex-col">
-              <label htmlFor="date-range" className="text-sm font-medium mb-1">Período</label>
-              <div className="flex items-center space-x-2">
-                <button 
-                  onClick={() => changeMonth('prev')}
-                  className="p-1 rounded-md hover:bg-gray-100"
-                  title="Mes anterior"
-                >
-                  <ChevronDown className="h-5 w-5 transform rotate-90" />
-                </button>
-                
-                <div className="flex flex-1 space-x-2">
-                  <input 
-                    type="date" 
-                    value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
-                    className="border rounded-md p-2 text-sm w-full"
-                  />
-                  <input 
-                    type="date" 
-                    value={endDate}
-                    onChange={(e) => setEndDate(e.target.value)}
-                    className="border rounded-md p-2 text-sm w-full"
-                  />
-                </div>
-                
-                <button 
-                  onClick={() => changeMonth('next')}
-                  className="p-1 rounded-md hover:bg-gray-100"
-                  title="Mes siguiente"
-                >
-                  <ChevronDown className="h-5 w-5 transform -rotate-90" />
-                </button>
-              </div>
-            </div>
-            
-            {/* Filtro por tipo */}
-            <div className="flex flex-col">
-              <label className="text-sm font-medium mb-1">Tipos de cuenta</label>
-              <div className="flex flex-wrap gap-2 border rounded-md p-2 max-h-24 overflow-y-auto">
-                {accountTypes.map(type => (
-                  <label key={type} className="inline-flex items-center cursor-pointer">
-                    <input 
-                      type="checkbox"
-                      className="form-checkbox h-4 w-4 text-blue-600"
-                      checked={selectedTypes.includes(type)}
-                      onChange={(e) => {
-                        if (e.target.checked) {
-                          setSelectedTypes(prev => [...prev, type]);
-                        } else {
-                          setSelectedTypes(prev => prev.filter(t => t !== type));
-                        }
-                      }}
-                    />
-                    <span className="ml-1 text-sm text-gray-700">{getAccountTypeLabel(type)}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-            
             {/* Búsqueda */}
-            <div className="flex flex-col">
-              <label htmlFor="search" className="text-sm font-medium mb-1">Buscar cuenta</label>
+            <div>
               <form onSubmit={handleSearch} className="flex">
-                <input 
+                <input
                   type="text"
-                  id="search"
+                  className="input input-bordered input-sm w-full"
+                  placeholder="Buscar por código o nombre..."
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="Código o nombre..."
-                  className="border rounded-l-md p-2 text-sm w-full"
                 />
                 <button 
-                  type="submit"
-                  className="bg-blue-600 text-white px-3 rounded-r-md hover:bg-blue-700"
+                  type="submit" 
+                  className="btn btn-sm btn-primary ml-2"
                 >
-                  <Search className="h-4 w-4" />
+                  <Search className="w-4 h-4" />
                 </button>
               </form>
             </div>
-          </div>
-          
-          {/* Opciones adicionales */}
-          <div className="flex items-center justify-between mt-4 pt-4 border-t">
-            {/* Checkbox saldos en cero */}
-            <div className="flex items-center">
-              <input
-                type="checkbox"
-                id="show-zero"
-                checked={showZeroBalances}
-                onChange={() => setShowZeroBalances(!showZeroBalances)}
-                className="form-checkbox h-4 w-4 text-blue-600"
-              />
-              <label htmlFor="show-zero" className="ml-2 text-sm text-gray-700">
-                Mostrar cuentas sin movimientos
-              </label>
+            
+            {/* Filtro por tipo de cuenta */}
+            <div>
+              <select
+                className="select select-bordered select-sm w-full"
+                value={selectedTypes.length === accountTypes.length ? 'all' : selectedTypes.join(',')}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  if (value === 'all') {
+                    setSelectedTypes(accountTypes);
+                  } else {
+                    setSelectedTypes(value.split(','));
+                  }
+                }}
+              >
+                <option value="all">Todos los tipos de cuenta</option>
+                {accountTypes.map(type => (
+                  <option key={type} value={type}>
+                    {getAccountTypeLabel(type)}
+                  </option>
+                ))}
+              </select>
             </div>
             
-            {/* Botones de acción */}
-            <div className="flex space-x-2">
-              <button
-                onClick={resetFilters}
-                className="flex items-center px-4 py-2 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
+            {/* Filtro por cuenta */}
+            <div>
+              <select
+                className="select select-bordered select-sm w-full"
+                value={selectedAccountId}
+                onChange={(e) => setSelectedAccountId(e.target.value)}
               >
-                <RefreshCw className="h-4 w-4 mr-1" /> Resetear
-              </button>
-              
-              <button
-                onClick={loadLedgerData}
-                className="flex items-center px-4 py-2 text-sm bg-blue-600 text-white rounded-md hover:bg-blue-700"
-                disabled={loading}
-              >
-                {loading ? <Loader className="h-4 w-4 mr-1 animate-spin" /> : <Search className="h-4 w-4 mr-1" />}
-                Consultar
-              </button>
+                <option value="">Todas las cuentas</option>
+                {accounts.map(account => (
+                  <option key={account.id} value={account.id}>
+                    {account.code} - {account.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            {/* Mostrar saldos cero */}
+            <div className="md:col-span-3">
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="checkbox checkbox-sm checkbox-primary"
+                  checked={showZeroBalances}
+                  onChange={(e) => setShowZeroBalances(e.target.checked)}
+                />
+                <span className="ml-2 text-sm">Mostrar cuentas con saldo cero</span>
+              </label>
             </div>
           </div>
-        </div>
-        
-        {/* Botones de exportación */}
-        <div className="flex justify-end mb-4 space-x-2">
-          <button
-            onClick={handleExpandAll}
-            className="flex items-center px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
-          >
-            {expanded ? 
-              <><ChevronDown className="h-4 w-4 mr-1" /> Colapsar todo</> : 
-              <><ChevronRight className="h-4 w-4 mr-1" /> Expandir todo</>
-            }
-          </button>
-          
-          <button
-            onClick={printLedger}
-            className="flex items-center px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
-            disabled={isExporting}
-          >
-            <Printer className="h-4 w-4 mr-1" /> Imprimir
-          </button>
-          
-          <button
-            onClick={exportToExcel}
-            className="flex items-center px-3 py-1 text-sm bg-green-600 text-white rounded-md hover:bg-green-700"
-            disabled={isExporting}
-          >
-            {isExporting ? <Loader className="h-4 w-4 mr-1 animate-spin" /> : <FileText className="h-4 w-4 mr-1" />}
-            Excel
-          </button>
-          
-          <button
-            onClick={exportToCSV}
-            className="flex items-center px-3 py-1 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700"
-            disabled={isExporting}
-          >
-            {isExporting ? <Loader className="h-4 w-4 mr-1 animate-spin" /> : <Download className="h-4 w-4 mr-1" />}
-            CSV
-          </button>
-        </div>
-      </div>
-      
-      {/* Título para impresión */}
-      <div className="hidden print:block mb-4">
-        <h1 className="text-center text-2xl font-bold">LIBRO MAYOR</h1>
-        <p className="text-center text-lg">
-          {startDate && formatSafeDate(startDate, "d 'de' MMMM 'de' yyyy", { locale: es })}
-          {startDate && endDate && " - "}
-          {endDate && formatSafeDate(endDate, "d 'de' MMMM 'de' yyyy", { locale: es })}
-        </p>
-      </div>
-      
-      {/* Tabla del Libro Mayor */}
-      {loading ? (
-        <div className="flex flex-col items-center justify-center h-64">
-          <Loader className="h-8 w-8 text-blue-600 animate-spin mb-4" />
-          <p className="text-gray-500">Cargando libro mayor...</p>
-        </div>
-      ) : ledgerData.length === 0 ? (
-        <div className="flex flex-col items-center justify-center h-64 bg-white rounded-lg shadow">
-          <AlertCircle className="h-16 w-16 text-gray-400 mb-4" />
-          <p className="text-xl text-gray-500 mb-2">No hay datos para mostrar</p>
-          <p className="text-gray-400">Prueba con diferentes filtros o fechas</p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-lg shadow overflow-auto print:shadow-none">
-          <table className="min-w-full divide-y divide-gray-200">
-            <thead className="bg-gray-50">
-              <tr>
-                <th scope="col" className="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Cuenta
-                </th>
-                <th scope="col" className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Saldo Inicial
-                </th>
-                <th scope="col" className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Débitos
-                </th>
-                <th scope="col" className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Créditos
-                </th>
-                <th scope="col" className="px-3 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Saldo Final
-                </th>
-                <th scope="col" className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider print:hidden">
-                  Acciones
-                </th>
-              </tr>
-            </thead>
-            <tbody className="bg-white divide-y divide-gray-200">
-              {ledgerData.map((ledgerAccount) => (
-                <React.Fragment key={ledgerAccount.accountId}>
-                  {/* Fila de cuenta */}
-                  <tr className={`${ledgerAccount.hasChildren ? 'font-semibold' : ''} hover:bg-gray-50`}>
-                    <td className="px-3 py-2 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div style={{ width: `${(ledgerAccount.level - 1) * 20}px` }} className="flex-shrink-0"></div>
-                        <button
-                          onClick={() => handleAccountExpand(ledgerAccount.accountId)}
-                          className={`mr-1 ${ledgerAccount.movements.length === 0 ? 'invisible' : 'visible'} print:hidden`}
-                        >
-                          {ledgerAccount.expanded ? (
-                            <ChevronDown className="h-4 w-4 text-gray-500" />
-                          ) : (
-                            <ChevronRight className="h-4 w-4 text-gray-500" />
-                          )}
-                        </button>
-                        <span className={ledgerAccount.account.is_parent ? 'font-bold text-blue-800' : ''}>
-                          {ledgerAccount.account.code}
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 whitespace-nowrap">
-                      <div className="flex items-center">
-                        <div style={{ width: `${(ledgerAccount.level - 1) * 20}px` }} className="flex-shrink-0"></div>
-                        <div className="flex items-center">
-                          {ledgerAccount.account.is_parent && (
-                            <div className="mr-2 px-1.5 py-0.5 bg-blue-100 text-blue-800 text-xs font-medium rounded">
-                              Padre
-                            </div>
-                          )}
-                          <span className={ledgerAccount.account.is_parent ? 'font-bold text-blue-800' : ''}>
-                            {ledgerAccount.account.name}
-                            {ledgerAccount.hasChildren && !ledgerAccount.account.is_parent && (
-                              <span className="ml-2 text-xs text-gray-500">
-                                (Tiene subcuentas)
-                              </span>
-                            )}
-                          </span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 whitespace-nowrap text-right text-sm font-medium">
-                      {formatCurrency(ledgerAccount.initialBalance)}
-                    </td>
-                    <td className="px-3 py-2 whitespace-nowrap text-right text-sm">
-                      {formatCurrency(ledgerAccount.totalDebit)}
-                    </td>
-                    <td className="px-3 py-2 whitespace-nowrap text-right text-sm">
-                      {formatCurrency(ledgerAccount.totalCredit)}
-                    </td>
-                    <td className={`px-3 py-2 whitespace-nowrap text-right text-sm font-medium ${
-                      ledgerAccount.finalBalance < 0 ? 'text-red-600' : 'text-blue-600'
-                    }`}>
-                      {formatCurrency(ledgerAccount.finalBalance)}
-                    </td>
-                    <td className="px-3 py-2 whitespace-nowrap text-center text-sm font-medium print:hidden">
-                      <button
-                        onClick={() => setSelectedAccountId(ledgerAccount.accountId)}
-                        className="text-blue-600 hover:text-blue-900"
-                        title="Ver solo esta cuenta"
-                      >
-                        <Search className="h-4 w-4" />
-                      </button>
-                    </td>
-                  </tr>
-                  
-                  {/* Filas de movimientos (si está expandida) */}
-                  {ledgerAccount.expanded && ledgerAccount.movements.length > 0 && (
-                    <>
-                      {/* Encabezados de movimientos */}
-                      <tr className="bg-gray-100 text-xs">
-                        <td colSpan={6} className="px-3 py-1">
-                          <div className="grid grid-cols-6 gap-2 pl-10">
-                            <div className="font-medium">Fecha</div>
-                            <div className="font-medium">Nº Asiento</div>
-                            <div className="font-medium col-span-2">Descripción</div>
-                            <div className="font-medium text-right">Débito</div>
-                            <div className="font-medium text-right">Crédito</div>
-                          </div>
-                        </td>
-                      </tr>
-                      
-                      {/* Movimientos */}
-                      {ledgerAccount.movements.map((movement) => (
-                        <tr key={movement.id} className="bg-gray-50 hover:bg-gray-100">
-                          <td colSpan={6} className="px-3 py-1 border-b border-gray-200">
-                            <div className="grid grid-cols-6 gap-2 pl-10 text-xs">
-                              <div>
-                                {movement.date ? formatSafeDate(movement.date, 'dd/MM/yyyy') : ''}
-                              </div>
-                              <div>{movement.entry_number}</div>
-                              <div className="col-span-2">{movement.description}</div>
-                              <div className="text-right">
-                                {movement.debit > 0 ? formatCurrency(movement.debit) : ''}
-                              </div>
-                              <div className="text-right">
-                                {movement.credit > 0 ? formatCurrency(movement.credit) : ''}
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                      
-                      {/* Total de movimientos */}
-                      <tr className="bg-gray-100">
-                        <td colSpan={6} className="px-3 py-2 border-b border-gray-300">
-                          <div className="grid grid-cols-6 gap-2 pl-10 text-xs font-semibold">
-                            <div className="col-span-3 text-right">Total de movimientos:</div>
-                            <div className="text-right">{formatCurrency(ledgerAccount.totalDebit)}</div>
-                            <div className="text-right">{formatCurrency(ledgerAccount.totalCredit)}</div>
-                            <div className="text-right"></div>
-                          </div>
-                        </td>
-                      </tr>
-                    </>
-                  )}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table>
         </div>
       )}
       
-      {/* Panel informativo */}
-      <div className="mt-6 bg-blue-50 p-4 rounded-lg border border-blue-200 print:hidden">
-        <h3 className="text-sm font-semibold text-blue-800 mb-2">Información</h3>
-        <ul className="text-xs text-blue-700 list-disc pl-5 space-y-1">
-          <li>El Libro Mayor muestra los movimientos de cada cuenta en el período seleccionado.</li>
-          <li>Solo se incluyen los asientos contables que han sido aprobados.</li>
-          <li>Las cuentas padre aparecen en negrita y pueden tener subcuentas.</li>
-          <li>Utilice los filtros para buscar cuentas específicas o limitar los resultados.</li>
-        </ul>
+      {/* Tabla del libro mayor */}
+      <div className="relative overflow-x-auto shadow-md sm:rounded-lg">
+        {loading ? (
+          <div className="flex justify-center items-center p-10 bg-base-100">
+            <div className="loading loading-spinner loading-lg text-primary"></div>
+          </div>
+        ) : ledgerData.length === 0 ? (
+          <div className="flex flex-col items-center justify-center p-10 bg-base-100 text-center">
+            <AlertCircle className="h-10 w-10 text-gray-400 mb-2" />
+            <h3 className="font-medium text-lg text-gray-700">No hay datos disponibles</h3>
+            <p className="text-gray-500 mt-1">
+              Ajuste los filtros o seleccione un período diferente
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="p-2 bg-base-100 flex justify-between items-center border-b print:hidden">
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={handleExpandAll}
+              >
+                {expanded ? 'Colapsar todo' : 'Expandir todo'}
+                {expanded ? <ChevronUp width={16} height={16} className="ml-1" /> : <ChevronDown width={16} height={16} className="ml-1" />}
+              </button>
+              
+              <div className="text-sm text-gray-500">
+                {ledgerData.length} cuenta{ledgerData.length !== 1 ? 's' : ''} mostrada{ledgerData.length !== 1 ? 's' : ''}
+              </div>
+            </div>
+            
+            <table className="w-full text-sm text-left">
+              <thead className="text-xs uppercase bg-gray-50">
+                <tr>
+                  <th className="px-4 py-3 w-10"></th>
+                  <th className="px-4 py-3">Código</th>
+                  <th className="px-4 py-3">Cuenta</th>
+                  <th className="px-4 py-3 text-right">Saldo Inicial</th>
+                  <th className="px-4 py-3 text-right">Débitos</th>
+                  <th className="px-4 py-3 text-right">Créditos</th>
+                  <th className="px-4 py-3 text-right">Saldo Final</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ledgerData.map((account) => (
+                  <React.Fragment key={account.accountId}>
+                    {/* Fila de la cuenta */}
+                    <tr className={`bg-white border-b hover:bg-gray-50 ${account.isParent ? 'font-medium' : ''}`}>
+                      <td className="px-2 py-3">
+                        {account.movements.length > 0 ? (
+                          <button
+                            className="btn btn-ghost btn-xs btn-circle"
+                            onClick={() => handleAccountExpand(account.accountId)}
+                          >
+                            {account.expanded ? (
+                              <ChevronDownIcon width={16} height={16} />
+                            ) : (
+                              <ChevronRightIcon width={16} height={16} />
+                            )}
+                          </button>
+                        ) : null}
+                      </td>
+                      <td className="px-4 py-3 font-medium">
+                        {account.account.code}
+                      </td>
+                      <td className="px-4 py-3">
+                        {account.account.name}
+                        {account.isParent && (
+                          <span className="ml-2 text-xs text-gray-500">
+                            ({account.childrenCount} subcuenta{account.childrenCount !== 1 ? 's' : ''})
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono">
+                        {formatCurrency(account.initialBalance)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono">
+                        {formatCurrency(account.totalDebit)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono">
+                        {formatCurrency(account.totalCredit)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono font-medium">
+                        {formatCurrency(account.finalBalance)}
+                      </td>
+                    </tr>
+                    
+                    {/* Filas de movimientos */}
+                    {account.expanded && account.movements.map((movement) => (
+                      <tr key={movement.id} className="bg-gray-50 text-xs border-b">
+                        <td className="px-2 py-2"></td>
+                        <td className="px-4 py-2 text-gray-500">
+                          {formatSafeDate(movement.date, 'dd/MM/yyyy')}
+                        </td>
+                        <td className="px-4 py-2">
+                          <div className="flex items-center">
+                            <span className="text-gray-700 font-medium">
+                              Asiento #{movement.entry_number}
+                            </span>
+                          </div>
+                          <p className="text-gray-500 mt-1 line-clamp-2">
+                            {movement.description}
+                          </p>
+                        </td>
+                        <td className="px-4 py-2"></td>
+                        <td className="px-4 py-2 text-right font-mono">
+                          {movement.debit > 0 ? formatCurrency(movement.debit) : ''}
+                        </td>
+                        <td className="px-4 py-2 text-right font-mono">
+                          {movement.credit > 0 ? formatCurrency(movement.credit) : ''}
+                        </td>
+                        <td className="px-4 py-2 text-right font-mono font-medium">
+                          {formatCurrency(movement.balance)}
+                        </td>
+                      </tr>
+                    ))}
+                    
+                    {/* Mensaje si no hay movimientos */}
+                    {account.expanded && account.movements.length === 0 && (
+                      <tr className="bg-gray-50 text-xs border-b">
+                        <td colSpan={7} className="px-4 py-2 text-center text-gray-500">
+                          No hay movimientos en el período seleccionado
+                        </td>
+                      </tr>
+                    )}
+                  </React.Fragment>
+                ))}
+                
+                {/* Fila de totales */}
+                <tr className="bg-base-200 font-medium">
+                  <td className="px-2 py-3"></td>
+                  <td className="px-4 py-3"></td>
+                  <td className="px-4 py-3">TOTALES</td>
+                  <td className="px-4 py-3 text-right font-mono">
+                    {formatCurrency(totals.initialBalance)}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono">
+                    {formatCurrency(totals.debit)}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono">
+                    {formatCurrency(totals.credit)}
+                  </td>
+                  <td className="px-4 py-3 text-right font-mono">
+                    {formatCurrency(totals.finalBalance)}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
+      
+      {/* Leyenda y notas */}
+      <div className="mt-4 text-xs text-gray-500 print:hidden">
+        <div className="flex items-center">
+          <ChevronDownIcon width={14} height={14} className="mr-1" />
+          <span>Expandir para ver los movimientos de la cuenta</span>
+        </div>
+        <p className="mt-1">
+          Nota: Los saldos iniciales son calculados sumando todos los movimientos aprobados anteriores a la fecha de inicio.
+        </p>
       </div>
     </div>
   );
 }
+
+// Componentes auxiliares para los íconos
+interface IconProps {
+  width?: number;
+  height?: number;
+  className?: string;
+}
+
+function ChevronUp({ width = 24, height = 24, className = '' }: IconProps) {
+  return (
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+      width={width}
+      height={height}
+      className={className}
+    >
+      <polyline points="18 15 12 9 6 15"></polyline>
+    </svg>
+  );
+}
+
+function ChevronLeft({ width = 24, height = 24, className = '' }: IconProps) {
+  return (
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+      width={width}
+      height={height}
+      className={className}
+    >
+      <polyline points="15 18 9 12 15 6"></polyline>
+    </svg>
+  );
+}
+
+function ChevronDown({ width = 24, height = 24, className = '' }: IconProps) {
+  return (
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+      width={width}
+      height={height}
+      className={className}
+    >
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  );
+}
+
+function ChevronRight({ width = 24, height = 24, className = '' }: IconProps) {
+  return (
+    <svg 
+      xmlns="http://www.w3.org/2000/svg" 
+      viewBox="0 0 24 24" 
+      fill="none" 
+      stroke="currentColor" 
+      strokeWidth="2" 
+      strokeLinecap="round" 
+      strokeLinejoin="round"
+      width={width}
+      height={height}
+      className={className}
+    >
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  );
+} 

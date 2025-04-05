@@ -57,7 +57,8 @@ export default function Dashboard() {
       const { count: pendingCount, error: pendingError } = await supabase
         .from('journal_entries')
         .select('*', { count: 'exact', head: true })
-        .eq('is_approved', false);
+        .eq('is_approved', false)
+        .neq('status', 'voided');
         
       if (pendingError) throw pendingError;
       
@@ -222,7 +223,7 @@ export default function Dashboard() {
                   <div className="ml-3">
                     <p className="text-sm text-yellow-700">
                       Tienes {stats.pendingApprovals} asientos pendientes de aprobación. 
-                      <Link to="/journal?status=pendiente" className="font-medium text-yellow-700 underline ml-1">Ver asientos</Link>
+                      <Link to="/journal?status=pendiente&excludeVoided=true" className="font-medium text-yellow-700 underline ml-1">Ver asientos</Link>
                     </p>
                   </div>
                 </div>

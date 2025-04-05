@@ -1,204 +1,431 @@
-import { supabase } from '../lib/supabaseClient';
+import { supabase } from '../lib/supabase';
 import { toast } from 'react-toastify';
 import Decimal from 'decimal.js';
 
-// Tipos de asientos de cierre
-export enum ClosingEntryType {
-  INCOME_SUMMARY = 'income_summary',
-  EXPENSE_SUMMARY = 'expense_summary',
-  PROFIT_LOSS = 'profit_loss',
-  BALANCE_TRANSFER = 'balance_transfer'
-}
-
-// Estructura para datos de cierre
-export interface ClosingData {
-  periodId: string;
-  userId: string;
-  date: string;
-  notes?: string;
-}
-
-// Resultado del proceso de cierre
-export interface ClosingResult {
-  success: boolean;
-  message: string;
-  closingEntryIds?: string[];
-  totalIncome?: number;
-  totalExpenses?: number;
-  netResult?: number;
-}
-
-interface AccountBalance {
-  id: string;
-  code: string;
-  name: string;
-  balance: Array<{ sum: number }>;
-}
-
 /**
- * Verifica si un período contable está listo para ser cerrado
+ * Verifica si un período está listo para ser cerrado
  */
-export const verifyPeriodReadyForClosing = async (
-  periodId: string
-): Promise<{ ready: boolean; message: string }> => {
-  const { data, error } = await supabase
-    .rpc('verify_period_ready_for_closing', {
-      p_period_id: periodId
-    });
-
-  if (error) {
-    throw new Error(`Error al verificar el cierre: ${error.message}`);
-  }
-
-  return data[0] || { ready: false, message: 'Error al verificar el cierre' };
-};
-
-/**
- * Genera los asientos de cierre para un período contable
- */
-export const generateClosingEntries = async (
-  periodId: string,
-  userId: string,
-  date: Date,
-  notes?: string
-): Promise<ClosingResult> => {
-  const { data, error } = await supabase
-    .rpc('generate_closing_entries', {
-      p_period_id: periodId,
-      p_user_id: userId,
-      p_date: date.toISOString().split('T')[0],
-      p_notes: notes
-    });
-
-  if (error) {
-    throw new Error(`Error al generar asientos de cierre: ${error.message}`);
-  }
-
-  const result = data[0];
-  return {
-    success: result.success,
-    message: result.message,
-    closingEntryIds: result.closing_entry_ids,
-    totalIncome: result.total_income,
-    totalExpenses: result.total_expenses,
-    netResult: result.net_result
-  };
-};
-
-/**
- * Obtiene los asientos de cierre de un período específico
- */
-export async function getClosingEntries(periodId: string): Promise<any[]> {
+export async function checkPeriodReadyForClosing(periodId: string) {
   try {
-    const { data, error } = await supabase
+    // Verificar asientos desbalanceados
+    const { data: unbalancedEntries, error: entriesError } = await supabase
       .from('journal_entries')
+      .select('id, entry_number')
+      .eq('accounting_period_id', periodId)
+      .eq('is_balanced', false);
+      
+    if (entriesError) throw entriesError;
+    
+    // Obtener datos financieros del período
+    const { data: periodData, error: periodError } = await supabase
+      .from('accounting_periods')
+      .select('*')
+      .eq('id', periodId)
+      .single();
+      
+    if (periodError) throw periodError;
+    
+    return {
+      isReady: unbalancedEntries?.length === 0,
+      hasUnbalancedEntries: unbalancedEntries?.length > 0,
+      unbalancedEntries: unbalancedEntries || [],
+      periodData
+    };
+  } catch (error) {
+    console.error('Error verificando estado para cierre:', error);
+    throw error;
+  }
+}
+
+/**
+ * Obtiene los saldos de cuentas para un período
+ */
+export async function getAccountBalancesForPeriod(periodId: string) {
+  try {
+    // Obtener período
+    const { data: period, error: periodError } = await supabase
+      .from('accounting_periods')
+      .select('start_date, end_date')
+      .eq('id', periodId)
+      .single();
+      
+    if (periodError) throw periodError;
+    
+    // Obtener cuentas activas
+    const { data: accounts, error: accountsError } = await supabase
+      .from('accounts')
+      .select('*')
+      .eq('is_active', true);
+      
+    if (accountsError) throw accountsError;
+    
+    // Obtener movimientos del período para todas las cuentas
+    const { data: movements, error: movementsError } = await supabase
+      .from('journal_entry_items')
       .select(`
-        id, 
-        date, 
-        description, 
-        closing_entry_type,
-        total_debit,
-        total_credit,
-        items:journal_entry_lines(
-          id,
-          account_id,
-          debit,
-          credit,
-          description,
-          account:accounts(id, code, name, type)
+        id,
+        account_id,
+        debit,
+        credit,
+        journal_entry:journal_entries!journal_entry_id(
+          date, 
+          is_approved, 
+          status,
+          accounting_period_id
         )
       `)
-      .eq('accounting_period_id', periodId)
-      .eq('is_closing_entry', true)
-      .order('date');
+      .gte('journal_entry.date', period.start_date)
+      .lte('journal_entry.date', period.end_date)
+      .eq('journal_entry.accounting_period_id', periodId)
+      .eq('journal_entry.is_approved', true)
+      .eq('journal_entry.status', 'aprobado');
+      
+    if (movementsError) throw movementsError;
     
-    if (error) throw error;
+    // Calcular saldos por cuenta
+    const balances = new Map();
     
-    return data || [];
+    accounts.forEach(account => {
+      balances.set(account.id, {
+        account,
+        debit: 0,
+        credit: 0,
+        balance: 0
+      });
+    });
+    
+    movements.forEach(movement => {
+      const accountData = balances.get(movement.account_id);
+      if (accountData) {
+        accountData.debit += Number(movement.debit || 0);
+        accountData.credit += Number(movement.credit || 0);
+        
+        // Calcular saldo según tipo de cuenta
+        if (accountData.account.type === 'activo' || accountData.account.type === 'gasto' || accountData.account.type === 'costo') {
+          accountData.balance = accountData.debit - accountData.credit;
+        } else {
+          accountData.balance = accountData.credit - accountData.debit;
+        }
+      }
+    });
+    
+    return Array.from(balances.values());
   } catch (error) {
-    console.error('Error al obtener asientos de cierre:', error);
-    return [];
+    console.error('Error obteniendo saldos de cuentas:', error);
+    throw error;
   }
 }
 
 /**
- * Reabre un período contable
+ * Genera el asiento de cierre de resultados
  */
-export async function reopenAccountingPeriod(
-  periodId: string,
-  userId: string,
-  reason: string
-): Promise<{ success: boolean; message: string }> {
+export async function generateClosingEntry(periodId: string, userId: string) {
   try {
-    // 1. Verificar que el período esté cerrado
+    // Obtener período
     const { data: period, error: periodError } = await supabase
       .from('accounting_periods')
       .select('*')
       .eq('id', periodId)
       .single();
-
+      
     if (periodError) throw periodError;
-
-    if (!period.is_closed) {
-      return {
-        success: false,
-        message: 'El período ya está abierto'
-      };
+    
+    // Obtener saldos de cuentas
+    const accountBalances = await getAccountBalancesForPeriod(periodId);
+    
+    // Filtrar cuentas de resultado (ingresos y gastos) con saldo
+    const resultAccountItems = accountBalances.filter(item => 
+      (item.account.type === 'ingreso' || item.account.type === 'gasto' || item.account.type === 'costo') && 
+      Math.abs(item.balance) > 0.001
+    );
+    
+    if (resultAccountItems.length === 0) {
+      throw new Error('No hay cuentas de resultado con saldo para generar el asiento de cierre');
     }
-
-    // 2. Eliminar asientos de cierre
-    const { error: deleteError } = await supabase
+    
+    // Preparar líneas para el asiento de cierre
+    const closingLines = [];
+    let totalIncome = new Decimal(0);
+    let totalExpense = new Decimal(0);
+    
+    // Procesar cuentas de ingresos (se debitan para cerrarlas)
+    for (const item of resultAccountItems.filter(a => a.account.type === 'ingreso')) {
+      const balance = new Decimal(item.balance);
+      if (balance.greaterThan(0)) {
+        totalIncome = totalIncome.plus(balance);
+        closingLines.push({
+          account_id: item.account.id,
+          debit: balance.toNumber(),
+          credit: 0,
+          description: `Cierre de ${item.account.name}`
+        });
+      }
+    }
+    
+    // Procesar cuentas de gastos (se acreditan para cerrarlas)
+    for (const item of resultAccountItems.filter(a => a.account.type === 'gasto' || a.account.type === 'costo')) {
+      const balance = new Decimal(item.balance);
+      if (balance.greaterThan(0)) {
+        totalExpense = totalExpense.plus(balance);
+        closingLines.push({
+          account_id: item.account.id,
+          debit: 0,
+          credit: balance.toNumber(),
+          description: `Cierre de ${item.account.name}`
+        });
+      }
+    }
+    
+    // Obtener cuenta de resultados
+    const { data: resultAccountsList, error: resultAccountError } = await supabase
+      .from('accounts')
+      .select('*')
+      .or('code.eq.3105,name.ilike.%resultado%ejercicio%')
+      .eq('type', 'patrimonio')
+      .limit(1);
+      
+    if (resultAccountError) throw resultAccountError;
+    
+    if (!resultAccountsList || resultAccountsList.length === 0) {
+      throw new Error('No se encontró la cuenta de Resultados del Ejercicio');
+    }
+    
+    const resultAccount = resultAccountsList[0];
+    
+    // Balancear el asiento con cuenta de resultados
+    const netResult = totalIncome.minus(totalExpense);
+    closingLines.push({
+      account_id: resultAccount.id,
+      debit: netResult.lessThan(0) ? Math.abs(netResult.toNumber()) : 0,
+      credit: netResult.greaterThan(0) ? netResult.toNumber() : 0,
+      description: 'Traslado de resultados del ejercicio'
+    });
+    
+    // Crear asiento de cierre
+    const { data: closingEntry, error: entryError } = await supabase
       .from('journal_entries')
-      .delete()
-      .eq('accounting_period_id', periodId)
-      .eq('is_closing_entry', true);
-
-    if (deleteError) throw deleteError;
-
-    // 3. Reabrir el período
-    const { error: updateError } = await supabase
-      .from('accounting_periods')
-      .update({
-        is_closed: false,
-        is_reopened: true,
-        reopened_at: new Date().toISOString(),
-        reopened_by: userId,
-        notes: period.notes 
-          ? `${period.notes} | Reabierto: ${reason}` 
-          : `Reabierto: ${reason}`
+      .insert({
+        entry_number: `CIERRE-${period.name}`,
+        date: period.end_date,
+        description: `Asiento de cierre del período ${period.name}`,
+        accounting_period_id: periodId,
+        created_by: userId,
+        is_closing_entry: true,
+        is_balanced: true,
+        status: 'pendiente',
+        total_debit: totalIncome.plus(netResult.lessThan(0) ? Math.abs(netResult.toNumber()) : 0).toNumber(),
+        total_credit: totalExpense.plus(netResult.greaterThan(0) ? netResult.toNumber() : 0).toNumber()
       })
-      .eq('id', periodId);
-
-    if (updateError) throw updateError;
-
-    return {
-      success: true,
-      message: 'Período reabierto exitosamente'
-    };
+      .select()
+      .single();
+      
+    if (entryError) throw entryError;
+    
+    // Insertar líneas del asiento
+    const entryLines = closingLines.map(line => ({
+      ...line,
+      journal_entry_id: closingEntry.id
+    }));
+    
+    const { error: linesError } = await supabase
+      .from('journal_entry_items')
+      .insert(entryLines);
+      
+    if (linesError) throw linesError;
+    
+    return closingEntry;
   } catch (error) {
-    console.error('Error al reabrir período:', error);
-    return {
-      success: false,
-      message: `Error al reabrir período: ${(error as Error).message}`
-    };
+    console.error('Error generando asiento de cierre:', error);
+    throw error;
   }
 }
 
 /**
- * Actualiza el esquema de la base de datos para incluir las columnas necesarias
+ * Cierra un período contable
  */
-export async function updateDatabaseSchema(): Promise<void> {
+export async function closePeriod(periodId: string, userId: string) {
   try {
-    const { error } = await supabase.rpc('update_closing_schema');
+    // Cerrar el período
+    const { data, error } = await supabase
+      .from('accounting_periods')
+      .update({
+        is_closed: true,
+        closed_by: userId,
+        closed_at: new Date().toISOString()
+      })
+      .eq('id', periodId)
+      .select();
+      
+    if (error) throw error;
     
-    if (error) {
-      console.error('Error al actualizar schema:', error);
-      throw error;
+    return data;
+  } catch (error) {
+    console.error('Error cerrando período:', error);
+    throw error;
+  }
+}
+
+/**
+ * Genera asiento de apertura para el siguiente período
+ */
+export async function generateOpeningEntry(
+  currentPeriodId: string, 
+  nextPeriodId: string, 
+  userId: string
+) {
+  try {
+    // Obtener datos de los períodos
+    const { data: periods, error: periodError } = await supabase
+      .from('accounting_periods')
+      .select('*')
+      .in('id', [currentPeriodId, nextPeriodId]);
+      
+    if (periodError) throw periodError;
+    
+    const currentPeriod = periods.find(p => p.id === currentPeriodId);
+    const nextPeriod = periods.find(p => p.id === nextPeriodId);
+    
+    if (!currentPeriod || !nextPeriod) {
+      throw new Error('No se pudieron obtener los datos de los períodos');
     }
     
-    console.log('Schema actualizado correctamente');
+    // Obtener saldos de cuentas permanentes (activo, pasivo, patrimonio)
+    const accountBalances = await getAccountBalancesForPeriod(currentPeriodId);
+    const permanentAccounts = accountBalances.filter(item => 
+      (item.account.type === 'activo' || item.account.type === 'pasivo' || item.account.type === 'patrimonio') && 
+      Math.abs(item.balance) > 0.001
+    );
+    
+    if (permanentAccounts.length === 0) {
+      throw new Error('No hay cuentas permanentes con saldo para generar el asiento de apertura');
+    }
+    
+    // Preparar líneas para el asiento de apertura
+    const openingLines = [];
+    let totalDebit = new Decimal(0);
+    let totalCredit = new Decimal(0);
+    
+    // Procesar cuentas de activo (se debitan)
+    for (const item of permanentAccounts.filter(a => a.account.type === 'activo')) {
+      const balance = new Decimal(item.balance);
+      if (balance.greaterThan(0)) {
+        totalDebit = totalDebit.plus(balance);
+        openingLines.push({
+          account_id: item.account.id,
+          debit: balance.toNumber(),
+          credit: 0,
+          description: `Apertura de ${item.account.name}`
+        });
+      }
+    }
+    
+    // Procesar cuentas de pasivo y patrimonio (se acreditan)
+    for (const item of permanentAccounts.filter(a => a.account.type === 'pasivo' || a.account.type === 'patrimonio')) {
+      const balance = new Decimal(item.balance);
+      if (balance.greaterThan(0)) {
+        totalCredit = totalCredit.plus(balance);
+        openingLines.push({
+          account_id: item.account.id,
+          debit: 0,
+          credit: balance.toNumber(),
+          description: `Apertura de ${item.account.name}`
+        });
+      }
+    }
+    
+    // Crear asiento de apertura
+    const { data: openingEntry, error: entryError } = await supabase
+      .from('journal_entries')
+      .insert({
+        entry_number: `APERTURA-${nextPeriod.name}`,
+        date: nextPeriod.start_date,
+        description: `Asiento de apertura del período ${nextPeriod.name}`,
+        accounting_period_id: nextPeriodId,
+        created_by: userId,
+        is_opening_entry: true,
+        is_balanced: true,
+        status: 'pendiente',
+        total_debit: totalDebit.toNumber(),
+        total_credit: totalCredit.toNumber()
+      })
+      .select()
+      .single();
+      
+    if (entryError) throw entryError;
+    
+    // Insertar líneas del asiento
+    const entryLines = openingLines.map(line => ({
+      ...line,
+      journal_entry_id: openingEntry.id
+    }));
+    
+    const { error: linesError } = await supabase
+      .from('journal_entry_items')
+      .insert(entryLines);
+      
+    if (linesError) throw linesError;
+    
+    return openingEntry;
   } catch (error) {
-    console.error('Error al actualizar schema:', error);
+    console.error('Error generando asiento de apertura:', error);
+    throw error;
+  }
+}
+
+/**
+ * Crea el período siguiente
+ */
+export async function createNextPeriod(currentPeriodId: string, userId: string) {
+  try {
+    // Obtener período actual
+    const { data: currentPeriod, error: periodError } = await supabase
+      .from('accounting_periods')
+      .select('*')
+      .eq('id', currentPeriodId)
+      .single();
+      
+    if (periodError) throw periodError;
+    
+    // Calcular fechas del nuevo período
+    const startDate = new Date(currentPeriod.end_date);
+    startDate.setDate(startDate.getDate() + 1);
+    
+    const endDate = new Date(startDate);
+    // Si es período mensual
+    if (currentPeriod.period_type === 'monthly') {
+      endDate.setMonth(endDate.getMonth() + 1);
+      endDate.setDate(0); // Último día del mes
+    } else {
+      // Si es período anual
+      endDate.setFullYear(endDate.getFullYear() + 1);
+      endDate.setDate(endDate.getDate() - 1);
+    }
+    
+    // Formatear fechas como strings YYYY-MM-DD
+    const startDateStr = startDate.toISOString().split('T')[0];
+    const endDateStr = endDate.toISOString().split('T')[0];
+    
+    // Crear nuevo período
+    const { data: newPeriod, error: newPeriodError } = await supabase
+      .from('accounting_periods')
+      .insert({
+        name: `Período ${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}`,
+        start_date: startDateStr,
+        end_date: endDateStr,
+        is_active: true,
+        is_closed: false,
+        period_type: currentPeriod.period_type,
+        fiscal_year_id: currentPeriod.fiscal_year_id,
+        created_by: userId
+      })
+      .select()
+      .single();
+      
+    if (newPeriodError) throw newPeriodError;
+    
+    return newPeriod;
+  } catch (error) {
+    console.error('Error creando siguiente período:', error);
     throw error;
   }
 } 

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import JournalEntryForm from '../components/JournalEntryForm';
 import Modal from '../components/ui/Modal';
+import { useLocation } from 'react-router-dom';
 import { 
   fetchJournalEntries, 
   getJournalEntry, 
@@ -78,6 +79,7 @@ const adjustmentTypeShort = (type: AdjustmentType | null | undefined): string =>
 };
 
 export default function Journal() {
+  const location = useLocation();
   const [user, setUser] = useState<any>(null);
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [accounts, setAccounts] = useState<any[]>([]);
@@ -92,12 +94,28 @@ export default function Journal() {
   const [currentMonthlyPeriodId, setCurrentMonthlyPeriodId] = useState<string>('');
   const [entryTypeFilter, setEntryTypeFilter] = useState<'all' | 'regular' | 'adjustment'>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [excludeVoided, setExcludeVoided] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [sortField, setSortField] = useState('date');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [cancelModalVisible, setCancelModalVisible] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
   const [entryToCancel, setEntryToCancel] = useState<string | null>(null);
+
+  // Procesar parámetros de URL al cargar
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const statusParam = params.get('status');
+    const excludeVoidedParam = params.get('excludeVoided');
+    
+    if (statusParam) {
+      setStatusFilter(statusParam);
+    }
+    
+    if (excludeVoidedParam === 'true') {
+      setExcludeVoided(true);
+    }
+  }, [location.search]);
 
   // Obtener el usuario actual
   useEffect(() => {
@@ -119,7 +137,8 @@ export default function Journal() {
         entryType: entryTypeFilter,
         searchTerm: searchTerm || undefined,
         sortField,
-        sortOrder
+        sortOrder,
+        excludeVoided
       });
 
       if (error) {
@@ -202,7 +221,7 @@ export default function Journal() {
         // esto cubrirá el caso cuando no hay períodos definidos aún
         fetchEntries();
     }
-  }, [currentFiscalYearId, currentMonthlyPeriodId, statusFilter, entryTypeFilter, searchTerm, sortField, sortOrder]);
+  }, [currentFiscalYearId, currentMonthlyPeriodId, statusFilter, entryTypeFilter, searchTerm, sortField, sortOrder, excludeVoided]);
 
   // Crear nuevo asiento regular
   const handleCreate = () => {
@@ -447,20 +466,22 @@ export default function Journal() {
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold">Diario Contable</h1>
         <div className="flex items-center space-x-2">
-           <button
-            onClick={handleCreate}
-            className="bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-md flex items-center text-sm font-medium shadow-sm"
-          >
-            <Plus size={18} className="mr-1" />
-            Nuevo Asiento
-          </button>
-          <button
-            onClick={handleCreateAdjustment}
-            className="bg-purple-600 hover:bg-purple-700 text-white py-2 px-4 rounded-md flex items-center text-sm font-medium shadow-sm"
-          >
-            <FileEdit size={18} className="mr-1" />
-            Nuevo Ajuste
-          </button>
+           <div className="flex justify-end space-x-2 mb-4">
+             <button
+               onClick={handleCreate}
+               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700"
+             >
+               <Plus className="h-4 w-4 mr-2" />
+               Nuevo Asiento
+             </button>
+             <button
+               onClick={handleCreateAdjustment}
+               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-indigo-600 hover:bg-indigo-700"
+             >
+               <Plus className="h-4 w-4 mr-2" />
+               Nuevo Ajuste
+             </button>
+           </div>
         </div>
       </div>
 
@@ -538,6 +559,11 @@ export default function Journal() {
       </div>
         
       <div className="bg-white rounded-lg shadow overflow-hidden">
+        {excludeVoided && (
+          <div className="bg-blue-50 p-2 text-blue-700 text-sm border-b border-blue-100">
+            <Info size={16} className="inline-block mr-1" /> Se están excluyendo los asientos anulados.
+          </div>
+        )}
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">

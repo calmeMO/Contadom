@@ -144,7 +144,8 @@ export function AccountForm({ account, onSuccess, onCancel }: AccountFormProps) 
           if (error) throw error;
           
           const baseCode = parentAccount.code;
-          let newCode = baseCode + '01'; // Código por defecto para la primera subcuenta
+          // El formato debe mantener la estructura jerárquica
+          let newCode = baseCode + "01"; // Código por defecto para la primera subcuenta
           
           if (existingSubaccounts && existingSubaccounts.length > 0) {
             // Encontrar el mayor sufijo numérico actual
@@ -213,34 +214,39 @@ export function AccountForm({ account, onSuccess, onCancel }: AccountFormProps) 
         
         if (error) throw error;
         
-        let maxNumeric = 0;
-        let numericLength = 3; // Por defecto 3 dígitos: prefix + 000
+        // Por defecto usamos el prefijo seguido de "000000"
+        let newCode = prefix + "000000";
         
         if (mainAccounts && mainAccounts.length > 0) {
-          // Encontrar el mayor valor numérico después del prefijo
-          mainAccounts.forEach(acc => {
-            if (acc.code.startsWith(prefix)) {
-              const numericPart = acc.code.substring(prefix.length);
-              if (numericPart && !isNaN(Number(numericPart))) {
-                const numeric = parseInt(numericPart);
-                maxNumeric = Math.max(maxNumeric, numeric);
-                numericLength = Math.max(numericLength, numericPart.length);
-              }
+          // Para mantener consistencia con los datos existentes, verificamos
+          // si ya existe una cuenta principal con el formato estándar
+          const mainAccount = mainAccounts[0];
+          
+          // Si ya existe al menos una cuenta principal, incrementamos el último número
+          // en lugar de seguir un formato totalmente nuevo
+          if (mainAccount) {
+            // Si existe una cuenta como "1000000", la siguiente será "1000001"
+            // Si existe una cuenta como "2000000", la siguiente será "2000001"
+            const lastCode = mainAccount.code;
+            // Incrementar el número apropiadamente
+            if (lastCode.length >= 7) {
+              const basePrefix = lastCode.substring(0, 1); // El primer carácter (1, 2, 3, etc.)
+              const numericPart = parseInt(lastCode.substring(1)) || 0;
+              const newNumericPart = (numericPart + 1).toString().padStart(6, '0');
+              newCode = basePrefix + newNumericPart;
             }
-          });
+          }
         }
-        
-        // Incrementar el número y formatear con ceros a la izquierda
-        const newNumeric = (maxNumeric + 1).toString().padStart(numericLength, '0');
-        let newCode = prefix + newNumeric;
         
         // Verificar si el código generado ya existe (podría ocurrir si hay inconsistencias)
         const isUnique = await verifyCodeIsUnique(newCode);
         
         if (!isUnique) {
           // Si ya existe (caso raro), generar un código con un valor más alto
-          const higherNumeric = (maxNumeric + 10).toString().padStart(numericLength, '0');
-          newCode = prefix + higherNumeric;
+          const basePrefix = newCode.substring(0, 1);
+          const numericPart = parseInt(newCode.substring(1)) || 0;
+          const newNumericPart = (numericPart + 10).toString().padStart(6, '0');
+          newCode = basePrefix + newNumericPart;
           
           // Verificar nuevamente
           const isUnique2 = await verifyCodeIsUnique(newCode);

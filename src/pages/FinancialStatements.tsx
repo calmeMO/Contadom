@@ -1,575 +1,505 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { supabase } from '../lib/supabase';
 import { toast } from 'react-toastify';
-import {
-  FileText,
-  Loader,
-  RefreshCw,
-  Download,
-  Printer,
-  AlertCircle
-} from 'lucide-react';
-import { fetchAccountingPeriods } from '../services/accountingPeriodService';
 import { 
-  getFinancialStatement, 
+  FileText, 
+  Filter, 
+  Loader, 
+  FileDown,
+  RefreshCw,
+  Calendar
+} from 'lucide-react';
+import { format } from 'date-fns';
+import * as XLSX from 'xlsx';
+import { 
+  fetchFinancialData, 
   generateBalanceSheet, 
   generateIncomeStatement,
   formatCurrency,
-  FinancialStatementData,
-  BalanceSheetData,
-  IncomeStatementData
-} from '../services/financialStatementService';
-import { useAuth } from '../contexts/AuthContext';
+  prepareBalanceSheetExport,
+  prepareIncomeStatementExport,
+  FinancialAccount
+} from '../services/financialStatementsService';
 
-// Adaptador con estructura más completa del estado financiero para la UI
-interface FinancialDisplay {
-  company_name: string;
-  period_name: string;
-  date: string;
-  assets?: {
-    current_assets: Array<{ account_id: string; account_name: string; amount: number }>;
-    non_current_assets: Array<{ account_id: string; account_name: string; amount: number }>;
-    total_current_assets: number;
-    total_non_current_assets: number;
-    total_assets: number;
-  };
-  liabilities?: {
-    current_liabilities: Array<{ account_id: string; account_name: string; amount: number }>;
-    non_current_liabilities: Array<{ account_id: string; account_name: string; amount: number }>;
-    total_current_liabilities: number;
-    total_non_current_liabilities: number;
-    total_liabilities: number;
-  };
-  equity?: {
-    equity_accounts: Array<{ account_id: string; account_name: string; amount: number }>;
-    total_equity: number;
-  };
-  revenues?: {
-    revenue_accounts: Array<{ account_id: string; account_name: string; amount: number }>;
-    total_revenues: number;
-  };
-  expenses?: {
-    expense_accounts: Array<{ account_id: string; account_name: string; amount: number }>;
-    total_expenses: number;
-  };
-  net_income?: number;
-}
+type TabType = 'balance' | 'income';
 
-export function FinancialStatements() {
-  const [loading, setLoading] = useState<boolean>(true);
-  const [periods, setPeriods] = useState<Array<{id: string, name: string}>>([]);
-  const [selectedPeriodId, setSelectedPeriodId] = useState<string>('');
-  const [statementType, setStatementType] = useState<'balance_sheet' | 'income_statement'>('balance_sheet');
-  const [statementData, setStatementData] = useState<FinancialStatementData | null>(null);
-  const [displayData, setDisplayData] = useState<FinancialDisplay | null>(null);
-  const { user } = useAuth();
+export default function FinancialStatements() {
+  const [loading, setLoading] = useState(true);
+  const [activePeriod, setActivePeriod] = useState<{ id: string; name: string; start_date: string; end_date: string } | null>(null);
+  const [activeTab, setActiveTab] = useState<TabType>('balance');
+  const [error, setError] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
   
-  // Inicializar datos
+  // Estado para Balance General
+  const [balanceSheet, setBalanceSheet] = useState<{
+    assets: FinancialAccount[];
+    liabilities: FinancialAccount[];
+    equity: FinancialAccount[];
+    totalAssets: number;
+    totalLiabilities: number;
+    totalEquity: number;
+    netIncome: number;
+    balanceTotal: number;
+  } | null>(null);
+  
+  // Estado para Estado de Resultados
+  const [incomeStatement, setIncomeStatement] = useState<{
+    revenue: FinancialAccount[];
+    expenses: FinancialAccount[];
+    totalRevenue: number;
+    totalExpenses: number;
+    netIncome: number;
+  } | null>(null);
+
+  // Cargar período activo al iniciar
   useEffect(() => {
-    initializeData();
+    fetchActivePeriod();
   }, []);
-  
-  // Cargar estado financiero cuando cambia el período o tipo
+
+  // Cargar datos financieros cuando se tiene el período activo
   useEffect(() => {
-    if (selectedPeriodId && statementType) {
-      loadFinancialStatement();
+    if (activePeriod) {
+      fetchFinancialReports(activePeriod.id);
     }
-  }, [selectedPeriodId, statementType]);
-  
-  // Procesar datos para visualización cuando cambia el estado financiero
-  useEffect(() => {
-    if (statementData?.data) {
-      processDisplayData();
-    } else {
-      setDisplayData(null);
-    }
-  }, [statementData]);
-  
-  // Procesar los datos del estado financiero para la visualización
-  function processDisplayData() {
-    if (!statementData) return;
-    
-    const companyName = "Contadom"; // Esto podría obtenerse de la configuración
-    
-    if (statementType === 'balance_sheet') {
-      const balanceData = statementData.data as BalanceSheetData;
-      
-      // Preparar los datos del balance general para visualización
-      const assets = {
-        current_assets: balanceData.assets
-          .filter(a => a.type === 'asset' && !a.is_parent)
-          .map(a => ({
-            account_id: a.id,
-            account_name: a.name,
-            amount: a.balance
-          })),
-        non_current_assets: [],
-        total_current_assets: balanceData.totalAssets,
-        total_non_current_assets: 0,
-        total_assets: balanceData.totalAssets
-      };
-      
-      const liabilities = {
-        current_liabilities: balanceData.liabilities
-          .filter(l => l.type === 'liability' && !l.is_parent)
-          .map(l => ({
-            account_id: l.id,
-            account_name: l.name,
-            amount: l.balance
-          })),
-        non_current_liabilities: [],
-        total_current_liabilities: balanceData.totalLiabilities,
-        total_non_current_liabilities: 0,
-        total_liabilities: balanceData.totalLiabilities
-      };
-      
-      const equity = {
-        equity_accounts: balanceData.equity
-          .filter(e => e.type === 'equity' && !e.is_parent)
-          .map(e => ({
-            account_id: e.id,
-            account_name: e.name,
-            amount: e.balance
-          })),
-        total_equity: balanceData.totalEquity
-      };
-      
-      setDisplayData({
-        company_name: companyName,
-        period_name: balanceData.periodName,
-        date: balanceData.date,
-        assets,
-        liabilities,
-        equity,
-        net_income: balanceData.netIncome
-      });
-    } else {
-      const incomeData = statementData.data as IncomeStatementData;
-      
-      // Preparar los datos del estado de resultados para visualización
-      const revenues = {
-        revenue_accounts: incomeData.revenue
-          .filter(r => r.type === 'revenue' && !r.is_parent)
-          .map(r => ({
-            account_id: r.id,
-            account_name: r.name,
-            amount: r.balance
-          })),
-        total_revenues: incomeData.totalRevenue
-      };
-      
-      const expenses = {
-        expense_accounts: [
-          ...incomeData.costs.filter(c => c.type === 'cost' && !c.is_parent).map(c => ({
-            account_id: c.id,
-            account_name: c.name,
-            amount: c.balance
-          })),
-          ...incomeData.expenses.filter(e => e.type === 'expense' && !e.is_parent).map(e => ({
-            account_id: e.id,
-            account_name: e.name,
-            amount: e.balance
-          }))
-        ],
-        total_expenses: incomeData.totalCosts + incomeData.totalExpenses
-      };
-      
-      setDisplayData({
-        company_name: companyName,
-        period_name: incomeData.periodName,
-        date: incomeData.date,
-        revenues,
-        expenses,
-        net_income: incomeData.netIncome
-      });
-    }
-  }
-  
-  async function initializeData() {
+  }, [activePeriod]);
+
+  // Función para cargar el período contable activo
+  async function fetchActivePeriod() {
     try {
       setLoading(true);
-      // Obtener períodos contables
-      const periodsData = await fetchAccountingPeriods();
-      setPeriods(periodsData.map((period: any) => ({
-        id: period.id,
-        name: period.name || `${period.year || ''} - ${period.period_number || ''}`
-      })));
+      setError(null);
       
-      // Seleccionar el último período por defecto
-      if (periodsData.length > 0) {
-        setSelectedPeriodId(periodsData[0].id);
-      }
-    } catch (error) {
-      console.error('Error al cargar los períodos contables', error);
-      toast.error('Error al cargar los períodos contables');
-    } finally {
-      setLoading(false);
-    }
-  }
-  
-  async function loadFinancialStatement() {
-    try {
-      setLoading(true);
-      
-      // Intentar obtener estado financiero existente
-      let statement = await getFinancialStatement(selectedPeriodId, statementType);
-      
-      // Si no existe, generarlo
-      if (!statement && user) {
-        if (statementType === 'balance_sheet') {
-          const balanceSheet = await generateBalanceSheet(selectedPeriodId, user.id);
-          // El estado ya ha sido guardado en la base de datos por generateBalanceSheet
-          // Obtener el estado financiero actualizado
-          statement = await getFinancialStatement(selectedPeriodId, statementType);
-        } else {
-          const incomeStatement = await generateIncomeStatement(selectedPeriodId, user.id);
-          // El estado ya ha sido guardado en la base de datos por generateIncomeStatement
-          // Obtener el estado financiero actualizado
-          statement = await getFinancialStatement(selectedPeriodId, statementType);
-        }
-      }
-      
-      setStatementData(statement);
-    } catch (error) {
-      console.error(`Error al cargar el ${statementType === 'balance_sheet' ? 'balance general' : 'estado de resultados'}`, error);
-      toast.error(`Error al cargar el ${statementType === 'balance_sheet' ? 'balance general' : 'estado de resultados'}`);
-      setStatementData(null);
-    } finally {
-      setLoading(false);
-    }
-  }
-  
-  async function handleRegenerateStatement() {
-    try {
-      if (!user) {
-        toast.error('Debe estar autenticado para regenerar estados financieros');
+      // Obtener el período activo y no cerrado
+      const { data, error } = await supabase
+        .from('accounting_periods')
+        .select('id, name, start_date, end_date')
+        .eq('is_active', true)
+        .eq('is_closed', false)
+        .order('end_date', { ascending: false })
+        .limit(1);
+
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        setError('No se encontró un período contable activo');
+        toast.warning('No se encontró un período contable activo');
         return;
       }
       
-      setLoading(true);
-      
-      if (statementType === 'balance_sheet') {
-        await generateBalanceSheet(selectedPeriodId, user.id);
-        toast.success('Balance general regenerado correctamente');
-      } else {
-        await generateIncomeStatement(selectedPeriodId, user.id);
-        toast.success('Estado de resultados regenerado correctamente');
-      }
-      
-      // Obtener el estado financiero actualizado después de regenerarlo
-      const statement = await getFinancialStatement(selectedPeriodId, statementType);
-      setStatementData(statement);
+      // Establecer el período activo
+      setActivePeriod(data[0]);
     } catch (error) {
-      console.error(`Error al regenerar el ${statementType === 'balance_sheet' ? 'balance general' : 'estado de resultados'}`, error);
-      toast.error(`Error al regenerar el ${statementType === 'balance_sheet' ? 'balance general' : 'estado de resultados'}`);
+      console.error('Error al cargar período contable activo:', error);
+      toast.error('Error al cargar el período contable activo');
+      setError('No se pudo cargar el período contable activo');
     } finally {
       setLoading(false);
     }
   }
-  
-  function handlePrint() {
-    window.print();
+
+  // Función para cargar los reportes financieros
+  const fetchFinancialReports = useCallback(async (periodId: string) => {
+    if (!periodId) return;
+    
+    setError(null);
+    setLoading(true);
+    
+    try {
+      // Cargar Balance General
+      const balanceSheetData = await generateBalanceSheet(periodId);
+      setBalanceSheet(balanceSheetData);
+      
+      // Cargar Estado de Resultados
+      const incomeStatementData = await generateIncomeStatement(periodId);
+      setIncomeStatement(incomeStatementData);
+    } catch (error: any) {
+      console.error('Error al cargar reportes financieros:', error);
+      toast.error('Error al cargar los reportes financieros');
+      setError(error.message || 'Error al cargar los reportes financieros');
+      setBalanceSheet(null);
+      setIncomeStatement(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Función para exportar Balance General
+  function exportBalanceSheet() {
+    if (!balanceSheet || !activePeriod) return;
+    
+    try {
+      setIsExporting(true);
+      
+      const excelData = prepareBalanceSheetExport(
+        activePeriod.name,
+        balanceSheet.assets,
+        balanceSheet.liabilities,
+        balanceSheet.equity,
+        balanceSheet.totalAssets,
+        balanceSheet.totalLiabilities,
+        balanceSheet.totalEquity,
+        balanceSheet.netIncome
+      );
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(excelData);
+
+      // Aplicar estilos a las celdas
+      if (!ws['!cols']) ws['!cols'] = [];
+      ws['!cols'] = [
+        { wch: 15 }, // Código
+        { wch: 40 }, // Cuenta
+        { wch: 20 }, // Monto
+      ];
+
+      // Aplicar formato de moneda a la columna de montos
+      for (let i = 6; i < excelData.length; i++) {
+        const cell = XLSX.utils.encode_cell({ r: i, c: 2 }); // columna C (índice 2)
+        if (ws[cell] && typeof ws[cell].v === 'number') {
+          ws[cell].z = '"$"#,##0.00';
+        }
+      }
+
+      XLSX.utils.book_append_sheet(wb, ws, 'Balance General');
+      XLSX.writeFile(wb, `balance_general_${format(new Date(), 'yyyyMMdd')}.xlsx`);
+      toast.success('Balance General exportado correctamente');
+    } catch (error) {
+      console.error('Error al exportar Balance General:', error);
+      toast.error('Error al exportar el Balance General');
+    } finally {
+      setIsExporting(false);
+    }
   }
-  
-  function renderBalanceSheet() {
-    if (!displayData || !displayData.assets || !displayData.liabilities || !displayData.equity) return null;
+
+  // Función para exportar Estado de Resultados
+  function exportIncomeStatement() {
+    if (!incomeStatement || !activePeriod) return;
     
-    const { company_name, period_name, date, assets, liabilities, equity, net_income } = displayData;
-    
-    return (
-      <div className="bg-white shadow-sm rounded-lg p-6 border border-gray-200 print:shadow-none print:border-none">
-        <div className="text-center mb-8 print:mb-6">
-          <h2 className="text-2xl font-bold text-gray-900">{company_name}</h2>
-          <h3 className="text-xl font-medium text-gray-800 mt-1">Balance General</h3>
-          <p className="text-gray-600 mt-1">Período: {period_name}</p>
-          <p className="text-gray-600">Al {new Date(date).toLocaleDateString('es-ES')}</p>
+    try {
+      setIsExporting(true);
+      
+      const excelData = prepareIncomeStatementExport(
+        activePeriod.name,
+        incomeStatement.revenue,
+        incomeStatement.expenses,
+        incomeStatement.totalRevenue,
+        incomeStatement.totalExpenses,
+        incomeStatement.netIncome
+      );
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(excelData);
+
+      // Aplicar estilos a las celdas
+      if (!ws['!cols']) ws['!cols'] = [];
+      ws['!cols'] = [
+        { wch: 15 }, // Código
+        { wch: 40 }, // Cuenta
+        { wch: 20 }, // Monto
+      ];
+
+      // Aplicar formato de moneda a la columna de montos
+      for (let i = 6; i < excelData.length; i++) {
+        const cell = XLSX.utils.encode_cell({ r: i, c: 2 }); // columna C (índice 2)
+        if (ws[cell] && typeof ws[cell].v === 'number') {
+          ws[cell].z = '"$"#,##0.00';
+        }
+      }
+
+      XLSX.utils.book_append_sheet(wb, ws, 'Estado de Resultados');
+      XLSX.writeFile(wb, `estado_resultados_${format(new Date(), 'yyyyMMdd')}.xlsx`);
+      toast.success('Estado de Resultados exportado correctamente');
+    } catch (error) {
+      console.error('Error al exportar Estado de Resultados:', error);
+      toast.error('Error al exportar el Estado de Resultados');
+    } finally {
+      setIsExporting(false);
+    }
+  }
+
+  // Renderizar contenido según el estado de carga
+  function renderContent() {
+    if (loading) {
+      return (
+        <div className="flex justify-center items-center py-12">
+          <Loader className="h-8 w-8 text-blue-500 animate-spin" />
+          <span className="ml-2 text-gray-500">Cargando datos financieros...</span>
         </div>
-        
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 print:gap-4">
-          <div>
-            <h4 className="text-lg font-medium text-gray-900 mb-4 border-b border-gray-200 pb-2">Activos</h4>
-            
-            <div className="space-y-6">
-              {/* Activos Corrientes */}
-              <div>
-                <h5 className="font-medium text-gray-800 mb-3">Activos Corrientes</h5>
-                <ul className="space-y-2">
-                  {assets.current_assets.map((item) => (
-                    <li key={item.account_id} className="flex justify-between">
-                      <span className="text-gray-700">{item.account_name}</span>
-                      <span className="text-gray-900 font-medium">{formatCurrency(item.amount)}</span>
-                    </li>
-                  ))}
-                </ul>
-                <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
-                  <span>Total Activos Corrientes</span>
-                  <span>{formatCurrency(assets.total_current_assets)}</span>
-                </div>
-              </div>
-              
-              {/* Activos No Corrientes */}
-              {assets.non_current_assets.length > 0 && (
-                <div>
-                  <h5 className="font-medium text-gray-800 mb-3">Activos No Corrientes</h5>
-                  <ul className="space-y-2">
-                    {assets.non_current_assets.map((item) => (
-                      <li key={item.account_id} className="flex justify-between">
-                        <span className="text-gray-700">{item.account_name}</span>
-                        <span className="text-gray-900 font-medium">{formatCurrency(item.amount)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
-                    <span>Total Activos No Corrientes</span>
-                    <span>{formatCurrency(assets.total_non_current_assets)}</span>
+      );
+    }
+
+    if (error) {
+      return (
+        <div className="text-center py-12">
+          <FileText className="mx-auto h-12 w-12 text-red-400" />
+          <h3 className="mt-2 text-sm font-medium text-gray-900">Error al cargar los datos</h3>
+          <p className="mt-1 text-sm text-gray-500">{error}</p>
+          <button 
+            onClick={() => fetchActivePeriod()}
+            className="mt-4 inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" /> Reintentar
+          </button>
+        </div>
+      );
+    }
+
+    if (!activePeriod) {
+      return (
+        <div className="text-center py-12">
+          <Calendar className="mx-auto h-12 w-12 text-gray-400" />
+          <h3 className="mt-2 text-sm font-medium text-gray-900">No hay período activo</h3>
+          <p className="mt-1 text-sm text-gray-500">
+            No se encontró un período contable activo. Active un período para visualizar los estados financieros.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-4">
+        {activeTab === 'balance' ? renderBalanceSheet() : renderIncomeStatement()}
+      </div>
+    );
+  }
+
+  // Renderizar Balance General
+  function renderBalanceSheet() {
+    if (!balanceSheet) return null;
+
+    return (
+      <div className="space-y-6">
+        <div className="flex justify-between">
+          <h3 className="text-lg font-medium text-gray-900">Balance General</h3>
+          <button
+            onClick={exportBalanceSheet}
+            disabled={isExporting}
+            className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none"
+          >
+            <FileDown className="w-4 h-4 mr-1" /> Exportar
+          </button>
+        </div>
+
+        {/* Contenido del Balance General */}
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+          {/* Activos */}
+          <div className="bg-white shadow rounded-lg p-4">
+            <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Activos</h4>
+            <div className="space-y-2">
+              {balanceSheet.assets.length > 0 ? (
+                balanceSheet.assets.map(account => (
+                  <div key={account.id} className="flex justify-between">
+                    <span className="text-sm text-gray-700">
+                      {account.code} - {account.name}
+                    </span>
+                    <span className="text-sm font-medium">{formatCurrency(account.balance)}</span>
                   </div>
-                </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-500">No hay activos registrados en este período</div>
               )}
-              
-              {/* Total Activos */}
-              <div className="flex justify-between font-bold border-t border-gray-300 mt-4 pt-3 text-lg">
+              <div className="border-t pt-2 mt-2 flex justify-between font-medium">
                 <span>Total Activos</span>
-                <span>{formatCurrency(assets.total_assets)}</span>
+                <span>{formatCurrency(balanceSheet.totalAssets)}</span>
               </div>
             </div>
           </div>
-          
-          <div>
-            <h4 className="text-lg font-medium text-gray-900 mb-4 border-b border-gray-200 pb-2">Pasivos y Patrimonio</h4>
-            
-            <div className="space-y-6">
-              {/* Pasivos Corrientes */}
-              <div>
-                <h5 className="font-medium text-gray-800 mb-3">Pasivos Corrientes</h5>
-                <ul className="space-y-2">
-                  {liabilities.current_liabilities.map((item) => (
-                    <li key={item.account_id} className="flex justify-between">
-                      <span className="text-gray-700">{item.account_name}</span>
-                      <span className="text-gray-900 font-medium">{formatCurrency(item.amount)}</span>
-                    </li>
-                  ))}
-                </ul>
-                <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
-                  <span>Total Pasivos Corrientes</span>
-                  <span>{formatCurrency(liabilities.total_current_liabilities)}</span>
-                </div>
-              </div>
-              
-              {/* Pasivos No Corrientes */}
-              {liabilities.non_current_liabilities.length > 0 && (
-                <div>
-                  <h5 className="font-medium text-gray-800 mb-3">Pasivos No Corrientes</h5>
-                  <ul className="space-y-2">
-                    {liabilities.non_current_liabilities.map((item) => (
-                      <li key={item.account_id} className="flex justify-between">
-                        <span className="text-gray-700">{item.account_name}</span>
-                        <span className="text-gray-900 font-medium">{formatCurrency(item.amount)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
-                    <span>Total Pasivos No Corrientes</span>
-                    <span>{formatCurrency(liabilities.total_non_current_liabilities)}</span>
+
+          {/* Pasivos */}
+          <div className="bg-white shadow rounded-lg p-4">
+            <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Pasivos</h4>
+            <div className="space-y-2">
+              {balanceSheet.liabilities.length > 0 ? (
+                balanceSheet.liabilities.map(account => (
+                  <div key={account.id} className="flex justify-between">
+                    <span className="text-sm text-gray-700">
+                      {account.code} - {account.name}
+                    </span>
+                    <span className="text-sm font-medium">{formatCurrency(account.balance)}</span>
                   </div>
-                </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-500">No hay pasivos registrados en este período</div>
               )}
-              
-              {/* Total Pasivos */}
-              <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
+              <div className="border-t pt-2 mt-2 flex justify-between font-medium">
                 <span>Total Pasivos</span>
-                <span>{formatCurrency(liabilities.total_liabilities)}</span>
-              </div>
-              
-              {/* Patrimonio */}
-              <div>
-                <h5 className="font-medium text-gray-800 mb-3">Patrimonio</h5>
-                <ul className="space-y-2">
-                  {equity.equity_accounts.map((item) => (
-                    <li key={item.account_id} className="flex justify-between">
-                      <span className="text-gray-700">{item.account_name}</span>
-                      <span className="text-gray-900 font-medium">{formatCurrency(item.amount)}</span>
-                    </li>
-                  ))}
-                  {net_income !== undefined && (
-                    <li className="flex justify-between">
-                      <span className="text-gray-700">Resultado del Período</span>
-                      <span className={`text-gray-900 font-medium ${net_income >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                        {formatCurrency(net_income)}
-                      </span>
-                    </li>
-                  )}
-                </ul>
-                <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
-                  <span>Total Patrimonio</span>
-                  <span>{formatCurrency(equity.total_equity + (net_income || 0))}</span>
-                </div>
-              </div>
-              
-              {/* Total Pasivo y Patrimonio */}
-              <div className="flex justify-between font-bold border-t border-gray-300 mt-4 pt-3 text-lg">
-                <span>Total Pasivo y Patrimonio</span>
-                <span>{formatCurrency(liabilities.total_liabilities + equity.total_equity + (net_income || 0))}</span>
+                <span>{formatCurrency(balanceSheet.totalLiabilities)}</span>
               </div>
             </div>
+          </div>
+
+          {/* Capital */}
+          <div className="bg-white shadow rounded-lg p-4">
+            <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Capital</h4>
+            <div className="space-y-2">
+              {balanceSheet.equity.length > 0 ? (
+                balanceSheet.equity.map(account => (
+                  <div key={account.id} className="flex justify-between">
+                    <span className="text-sm text-gray-700">
+                      {account.code} - {account.name}
+                    </span>
+                    <span className="text-sm font-medium">{formatCurrency(account.balance)}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-500">No hay cuentas de capital registradas en este período</div>
+              )}
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-700">Utilidad del Período</span>
+                <span className="font-medium">{formatCurrency(balanceSheet.netIncome)}</span>
+              </div>
+              <div className="border-t pt-2 mt-2 flex justify-between font-medium">
+                <span>Total Capital</span>
+                <span>{formatCurrency(balanceSheet.totalEquity + balanceSheet.netIncome)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Cuadre final */}
+        <div className="bg-white shadow rounded-lg p-4 mt-4">
+          <div className="flex justify-between font-medium text-lg">
+            <span>Total Pasivo y Capital</span>
+            <span>{formatCurrency(balanceSheet.balanceTotal)}</span>
           </div>
         </div>
       </div>
     );
   }
-  
+
+  // Renderizar Estado de Resultados
   function renderIncomeStatement() {
-    if (!displayData || !displayData.revenues || !displayData.expenses) return null;
-    
-    const { company_name, period_name, date, revenues, expenses, net_income } = displayData;
-    
+    if (!incomeStatement) return null;
+
     return (
-      <div className="bg-white shadow-sm rounded-lg p-6 border border-gray-200 print:shadow-none print:border-none">
-        <div className="text-center mb-8 print:mb-6">
-          <h2 className="text-2xl font-bold text-gray-900">{company_name}</h2>
-          <h3 className="text-xl font-medium text-gray-800 mt-1">Estado de Resultados</h3>
-          <p className="text-gray-600 mt-1">Período: {period_name}</p>
-          <p className="text-gray-600">Del {new Date(date).toLocaleDateString('es-ES')}</p>
+      <div className="space-y-6">
+        <div className="flex justify-between">
+          <h3 className="text-lg font-medium text-gray-900">Estado de Resultados</h3>
+          <button
+            onClick={exportIncomeStatement}
+            disabled={isExporting}
+            className="inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none"
+          >
+            <FileDown className="w-4 h-4 mr-1" /> Exportar
+          </button>
         </div>
-        
-        <div className="max-w-2xl mx-auto">
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {/* Ingresos */}
-          <div className="mb-6">
-            <h4 className="text-lg font-medium text-gray-900 mb-4 border-b border-gray-200 pb-2">Ingresos</h4>
-            <ul className="space-y-2">
-              {revenues.revenue_accounts.map((item) => (
-                <li key={item.account_id} className="flex justify-between">
-                  <span className="text-gray-700">{item.account_name}</span>
-                  <span className="text-gray-900 font-medium">{formatCurrency(item.amount)}</span>
-                </li>
-              ))}
-            </ul>
-            <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
-              <span>Total Ingresos</span>
-              <span>{formatCurrency(revenues.total_revenues)}</span>
+          <div className="bg-white shadow rounded-lg p-4">
+            <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Ingresos</h4>
+            <div className="space-y-2">
+              {incomeStatement.revenue.length > 0 ? (
+                incomeStatement.revenue.map(account => (
+                  <div key={account.id} className="flex justify-between">
+                    <span className="text-sm text-gray-700">
+                      {account.code} - {account.name}
+                    </span>
+                    <span className="text-sm font-medium">{formatCurrency(account.balance)}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-500">No hay ingresos registrados en este período</div>
+              )}
+              <div className="border-t pt-2 mt-2 flex justify-between font-medium">
+                <span>Total Ingresos</span>
+                <span>{formatCurrency(incomeStatement.totalRevenue)}</span>
+              </div>
             </div>
           </div>
-          
+
           {/* Gastos */}
-          <div className="mb-6">
-            <h4 className="text-lg font-medium text-gray-900 mb-4 border-b border-gray-200 pb-2">Gastos</h4>
-            <ul className="space-y-2">
-              {expenses.expense_accounts.map((item) => (
-                <li key={item.account_id} className="flex justify-between">
-                  <span className="text-gray-700">{item.account_name}</span>
-                  <span className="text-gray-900 font-medium">{formatCurrency(item.amount)}</span>
-                </li>
-              ))}
-            </ul>
-            <div className="flex justify-between font-medium border-t border-gray-200 mt-3 pt-2">
-              <span>Total Gastos</span>
-              <span>{formatCurrency(expenses.total_expenses)}</span>
+          <div className="bg-white shadow rounded-lg p-4">
+            <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Gastos</h4>
+            <div className="space-y-2">
+              {incomeStatement.expenses.length > 0 ? (
+                incomeStatement.expenses.map(account => (
+                  <div key={account.id} className="flex justify-between">
+                    <span className="text-sm text-gray-700">
+                      {account.code} - {account.name}
+                    </span>
+                    <span className="text-sm font-medium">{formatCurrency(account.balance)}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-500">No hay gastos registrados en este período</div>
+              )}
+              <div className="border-t pt-2 mt-2 flex justify-between font-medium">
+                <span>Total Gastos</span>
+                <span>{formatCurrency(incomeStatement.totalExpenses)}</span>
+              </div>
             </div>
           </div>
-          
-          {/* Resultado Neto */}
-          <div className="flex justify-between font-bold border-t border-gray-300 mt-4 pt-3 text-lg">
-            <span>Resultado Neto</span>
-            <span className={net_income !== undefined && net_income >= 0 ? 'text-green-600' : 'text-red-600'}>
-              {formatCurrency(net_income || 0)}
+        </div>
+
+        {/* Utilidad Neta */}
+        <div className="bg-white shadow rounded-lg p-4 mt-4">
+          <div className="flex justify-between font-medium text-lg">
+            <span>Utilidad Neta</span>
+            <span className={incomeStatement.netIncome >= 0 ? 'text-green-600' : 'text-red-600'}>
+              {formatCurrency(incomeStatement.netIncome)}
             </span>
           </div>
         </div>
       </div>
     );
   }
-  
+
   return (
-    <div className="container mx-auto px-4 py-8 print:px-0 print:py-0">
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between mb-6 print:hidden">
-        <h1 className="text-2xl font-bold text-gray-900 flex items-center">
-          <FileText className="h-6 w-6 mr-2 text-blue-500" />
-          Estados Financieros
-        </h1>
-        
-        {/* Controles */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center space-y-2 sm:space-y-0 sm:space-x-2 mt-4 md:mt-0">
-          <select
-            className="block w-full sm:w-auto px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-            value={selectedPeriodId}
-            onChange={(e) => setSelectedPeriodId(e.target.value)}
-            disabled={loading}
-          >
-            <option value="">Seleccionar período</option>
-            {periods.map(period => (
-              <option key={period.id} value={period.id}>
-                {period.name}
-              </option>
-            ))}
-          </select>
-          
-          <div className="flex space-x-2">
-            <button
-              type="button"
-              onClick={() => setStatementType('balance_sheet')}
-              className={`px-3 py-2 rounded-md text-sm font-medium ${
-                statementType === 'balance_sheet' ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              Balance General
-            </button>
-            
-            <button
-              type="button"
-              onClick={() => setStatementType('income_statement')}
-              className={`px-3 py-2 rounded-md text-sm font-medium ${
-                statementType === 'income_statement' ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-              }`}
-            >
-              Estado de Resultados
-            </button>
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold text-gray-900">Estados Financieros</h1>
+      </div>
+
+      {/* Información del período y tabs */}
+      <div className="bg-white shadow sm:rounded-lg">
+        <div className="px-4 py-5 sm:p-6">
+          {activePeriod && (
+            <div className="mb-4">
+              <h3 className="text-lg leading-6 font-medium text-gray-900 flex items-center">
+                <Calendar className="h-5 w-5 mr-2" />
+                Período Activo: {activePeriod.name}
+              </h3>
+              <p className="mt-1 text-sm text-gray-500">
+                Desde {format(new Date(activePeriod.start_date), 'dd/MM/yyyy')} hasta {format(new Date(activePeriod.end_date), 'dd/MM/yyyy')}
+              </p>
+            </div>
+          )}
+
+          {/* Tabs */}
+          <div className="border-b border-gray-200">
+            <nav className="-mb-px flex space-x-8">
+              <button
+                onClick={() => setActiveTab('balance')}
+                className={`${
+                  activeTab === 'balance'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center`}
+              >
+                Balance General
+              </button>
+              <button
+                onClick={() => setActiveTab('income')}
+                className={`${
+                  activeTab === 'income'
+                    ? 'border-blue-500 text-blue-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center`}
+              >
+                Estado de Resultados
+              </button>
+            </nav>
           </div>
         </div>
       </div>
-      
-      {/* Botones de acción */}
-      <div className="flex justify-end mb-4 space-x-2 print:hidden">
-        <button
-          type="button"
-          onClick={handleRegenerateStatement}
-          disabled={loading || !selectedPeriodId}
-          className="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
-        >
-          <RefreshCw className="h-4 w-4 mr-2" />
-          Regenerar
-        </button>
-        
-        <button
-          type="button"
-          onClick={handlePrint}
-          disabled={!displayData}
-          className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
-        >
-          <Printer className="h-4 w-4 mr-2" />
-          Imprimir
-        </button>
-      </div>
-      
+
       {/* Contenido principal */}
-      {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <Loader className="h-8 w-8 animate-spin text-blue-500" />
-          <span className="ml-2 text-gray-500">
-            Cargando {statementType === 'balance_sheet' ? 'balance general' : 'estado de resultados'}...
-          </span>
+      <div className="bg-white shadow sm:rounded-lg">
+        <div className="px-4 py-5 sm:p-6">
+          {renderContent()}
         </div>
-      ) : !displayData ? (
-        <div className="text-center py-12">
-          <AlertCircle className="h-12 w-12 text-yellow-500 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-gray-900 mb-2">No hay datos disponibles</h3>
-          <p className="text-gray-500 max-w-md mx-auto">
-            No se ha generado un {statementType === 'balance_sheet' ? 'balance general' : 'estado de resultados'} para el período seleccionado.
-            Selecciona un período contable con asientos aprobados o utiliza el botón "Regenerar".
-          </p>
-        </div>
-      ) : (
-        <>
-          {statementType === 'balance_sheet' ? renderBalanceSheet() : renderIncomeStatement()}
-        </>
-      )}
+      </div>
     </div>
   );
 } 

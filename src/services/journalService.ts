@@ -104,6 +104,7 @@ export interface JournalEntriesFilter {
   sortField?: string;
   sortOrder?: 'asc' | 'desc';
   entryType?: 'regular' | 'adjustment' | 'all'; // <- Nuevo filtro
+  excludeVoided?: boolean; // <- Nuevo filtro para excluir asientos anulados
 }
 
 /**
@@ -314,6 +315,12 @@ export async function fetchJournalEntries(filters: JournalEntriesFilter = {}): P
       query = query.eq('status', filters.status);
     }
 
+    // Filtro para excluir asientos anulados
+    if (filters.excludeVoided) {
+      console.log('Excluyendo asientos anulados');
+      query = query.neq('status', 'voided');
+    }
+
     // Filtro por tipo de asiento (regular o ajuste)
     if (filters.entryType && filters.entryType !== 'all') {
       const isAdjustment = filters.entryType === 'adjustment';
@@ -410,6 +417,143 @@ export async function getJournalEntry(id: string): Promise<{
 }
 
 /**
+ * Asegura que existe la tabla de secuencia para números de asiento
+ */
+async function ensureSequenceTableExists(): Promise<boolean> {
+  try {
+    // Verificar si la tabla existe consultando registros
+    const { data, error } = await supabase
+      .from('journal_sequence')
+      .select('id, last_number')
+      .limit(1);
+    
+    if (error) {
+      // Si hay error, probablemente la tabla no existe
+      console.warn('Error al verificar tabla de secuencia, probablemente no existe:', error);
+      
+      // No podemos crear la tabla directamente desde el cliente
+      // En su lugar, verificamos si hay asientos existentes para inicializar correctamente
+      return false;
+    }
+    
+    // Si no hay datos, insertar valor inicial
+    if (!data || data.length === 0) {
+      // Intentar insertar el valor inicial
+      const { error: insertError } = await supabase
+        .from('journal_sequence')
+        .insert({ id: 1, last_number: await getLastEntryNumberFromJournal() })
+        .select();
+      
+      if (insertError) {
+        console.error('Error al insertar valor inicial en secuencia:', insertError);
+        return false;
+      }
+    }
+    
+    return true;
+  } catch (err) {
+    console.error('Error al verificar tabla de secuencia:', err);
+    return false;
+  }
+}
+
+/**
+ * Obtiene el último número de asiento de la tabla journal_entries
+ */
+async function getLastEntryNumberFromJournal(): Promise<number> {
+  const { data, error } = await supabase
+    .from('journal_entries')
+    .select('entry_number')
+    .order('entry_number', { ascending: false })
+    .limit(1);
+    
+  if (error || !data || data.length === 0) {
+    return 0; // Si hay error o no hay asientos, comenzar con 0
+  }
+  
+  // Convertir a número
+  const lastNumber = parseInt(data[0].entry_number, 10);
+  return isNaN(lastNumber) ? 0 : lastNumber;
+}
+
+/**
+ * Obtiene el siguiente número de asiento consultando la tabla de secuencia
+ * o usando el método de respaldo si la tabla no existe
+ */
+async function getNextEntryNumber(): Promise<string> {
+  // Verificar si podemos usar la tabla journal_sequence
+  const sequenceExists = await ensureSequenceTableExists();
+  
+  // Si la tabla de secuencia existe, intentar usarla
+  if (sequenceExists) {
+    try {
+      // Intentar obtener y actualizar la secuencia
+      const { data, error } = await supabase
+        .from('journal_sequence')
+        .select('last_number')
+        .eq('id', 1)
+        .single();
+      
+      if (error || !data) {
+        console.warn('Error al leer secuencia, usando método alternativo:', error);
+        return getNextEntryNumberFallback();
+      }
+      
+      // Incrementar el contador
+      const nextNumber = data.last_number + 1;
+      
+      // Actualizar el valor en la tabla
+      const { error: updateError } = await supabase
+        .from('journal_sequence')
+        .update({ last_number: nextNumber })
+        .eq('id', 1);
+      
+      if (updateError) {
+        console.warn('Error al actualizar secuencia, usando método alternativo:', updateError);
+        return getNextEntryNumberFallback();
+      }
+      
+      return nextNumber.toString();
+    } catch (err) {
+      console.error('Error en secuencia, usando método alternativo:', err);
+      return getNextEntryNumberFallback();
+    }
+  }
+  
+  // Si no podemos usar la tabla de secuencia, usar el método fallback
+  return getNextEntryNumberFallback();
+}
+
+/**
+ * Método de respaldo para obtener el siguiente número de asiento
+ * (anterior implementación)
+ */
+async function getNextEntryNumberFallback(): Promise<string> {
+  const { data: lastEntryData, error: lastEntryError } = await supabase
+    .from('journal_entries')
+    .select('entry_number')
+    .order('entry_number', { ascending: false })
+    .limit(1);
+    
+  if (lastEntryError) {
+    console.error('Error al obtener último número de asiento:', lastEntryError);
+    return '1'; // Si hay error, comenzar con 1
+  }
+  
+  // Determinar el próximo número de asiento
+  let nextEntryNumber = '1'; // Si no hay asientos previos, comenzar con 1
+  if (lastEntryData && lastEntryData.length > 0 && lastEntryData[0].entry_number) {
+    // Intentar convertir a número y sumar 1
+    const lastNumber = parseInt(lastEntryData[0].entry_number, 10);
+    if (!isNaN(lastNumber)) {
+      nextEntryNumber = (lastNumber + 1).toString();
+    }
+  }
+  
+  return nextEntryNumber;
+}
+
+/**
  * Crear un nuevo asiento contable (incluye ajustes)
  */
 export async function createJournalEntry(
@@ -434,28 +578,8 @@ export async function createJournalEntry(
       throw new Error(balance.message);
     }
     
-    // Generar número de asiento - INICIO FIX
-    const { data: lastEntryData, error: lastEntryError } = await supabase
-      .from('journal_entries')
-      .select('entry_number')
-      .order('entry_number', { ascending: false })
-      .limit(1);
-      
-    if (lastEntryError) {
-      console.error('Error al obtener último número de asiento:', lastEntryError);
-      throw new Error('No se pudo generar número de asiento: ' + lastEntryError.message);
-    }
-    
-    // Determinar el próximo número de asiento
-    let nextEntryNumber = '1'; // Si no hay asientos previos, comenzar con 1
-    if (lastEntryData && lastEntryData.length > 0 && lastEntryData[0].entry_number) {
-      // Intentar convertir a número y sumar 1
-      const lastNumber = parseInt(lastEntryData[0].entry_number, 10);
-      if (!isNaN(lastNumber)) {
-        nextEntryNumber = (lastNumber + 1).toString();
-      }
-    }
-    // FIN FIX
+    // Obtener el siguiente número de asiento de forma segura
+    const nextEntryNumber = await getNextEntryNumber();
     
     // Generar ID del asiento
     const entryId = uuidv4();
@@ -463,7 +587,7 @@ export async function createJournalEntry(
     // Preparar datos del asiento
     const entryData = {
       id: entryId,
-      entry_number: nextEntryNumber, // Añadido para resolver error 400
+      entry_number: nextEntryNumber,
       date: formData.date,
       description: formData.description,
       monthly_period_id: formData.monthly_period_id,
@@ -803,5 +927,40 @@ export async function getJournalUsers(): Promise<{ id: string; email: string; fu
   } catch (error) {
     console.error('Error al obtener usuarios:', error);
     return [];
+  }
+}
+
+// Marcar un asiento existente como ajuste
+export async function markAsAdjustment(
+  entryId: string, 
+  adjustmentType: AdjustmentType, 
+  userId: string
+): Promise<{ success: boolean; error: Error | null }> {
+  try {
+    const { error } = await supabase
+      .from('journal_entries')
+      .update({
+        is_adjustment: true,
+        adjustment_type: adjustmentType,
+        updated_at: new Date().toISOString()
+      })
+      .eq('id', entryId);
+    
+    if (error) throw error;
+    
+    // Registrar la acción en el log de actividad
+    await supabase.from('activity_logs').insert({
+      user_id: userId,
+      action: 'update',
+      table_name: 'journal_entries',
+      record_id: entryId,
+      description: `Asiento marcado como ajuste de tipo "${adjustmentType}"`,
+      created_at: new Date().toISOString()
+    });
+    
+    return { success: true, error: null };
+  } catch (error) {
+    console.error('Error al marcar asiento como ajuste:', error);
+    return { success: false, error: error as Error };
   }
 } 

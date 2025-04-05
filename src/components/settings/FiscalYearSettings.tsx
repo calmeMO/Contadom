@@ -31,6 +31,7 @@ import {
 } from '../../services/accountingPeriodService';
 import Modal from '../ui/Modal';
 import Decimal from 'decimal.js';
+import { FiscalYearType } from '../../types/database';
 
 // Agregar interfaz para extender MonthlyPeriod con fiscal_year
 interface EnhancedMonthlyPeriod extends MonthlyPeriod {
@@ -49,7 +50,7 @@ interface LocalFiscalYear {
   end_date: string;
   is_closed: boolean;
   is_active: boolean;
-  fiscal_year_type: "calendar" | "custom";
+  fiscal_year_type: FiscalYearType;
   monthly_periods?: MonthlyPeriod[]; // Lista de períodos mensuales
   has_monthly_periods?: boolean; // Indicador de si ya tiene períodos
   monthly_periods_count?: number;
@@ -449,10 +450,57 @@ export function FiscalYearSettings() {
 
   const handleCreateFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
-    setFormData({
-      ...formData,
-      [name]: value
-    });
+    
+    if (name === 'fiscal_year_type') {
+      // Al cambiar el tipo de año fiscal, ajustar fechas automáticamente
+      const currentYear = new Date().getFullYear();
+      let startDate = '';
+      let endDate = '';
+      let yearName = '';
+      
+      // Configurar fechas según el tipo de año fiscal
+      switch (value) {
+        case 'calendar':
+          // Año calendario: 1 enero - 31 diciembre
+          startDate = `${currentYear}-01-01`;
+          endDate = `${currentYear}-12-31`;
+          yearName = `Año Calendario ${currentYear}`;
+          break;
+        case 'fiscal_mar':
+          // Año fiscal abril-marzo: 1 abril - 31 marzo del siguiente año
+          startDate = `${currentYear}-04-01`;
+          endDate = `${currentYear + 1}-03-31`;
+          yearName = `Año Fiscal Abr ${currentYear} - Mar ${currentYear + 1}`;
+          break;
+        case 'fiscal_jun':
+          // Año fiscal julio-junio: 1 julio - 30 junio del siguiente año
+          startDate = `${currentYear}-07-01`;
+          endDate = `${currentYear + 1}-06-30`;
+          yearName = `Año Fiscal Jul ${currentYear} - Jun ${currentYear + 1}`;
+          break;
+        case 'fiscal_sep':
+          // Año fiscal octubre-septiembre: 1 octubre - 30 septiembre del siguiente año
+          startDate = `${currentYear}-10-01`;
+          endDate = `${currentYear + 1}-09-30`;
+          yearName = `Año Fiscal Oct ${currentYear} - Sep ${currentYear + 1}`;
+          break;
+      }
+      
+      // Actualizar formulario con fechas y tipo
+      setFormData({
+        ...formData,
+        fiscal_year_type: value as FiscalYearType,
+        start_date: startDate,
+        end_date: endDate,
+        name: yearName
+      });
+    } else {
+      // Para otros campos, actualizar normalmente
+      setFormData({
+        ...formData,
+        [name]: value
+      });
+    }
   };
 
   const handleSubmitCreateForm = async (e: React.FormEvent) => {
@@ -466,14 +514,42 @@ export function FiscalYearSettings() {
     try {
       setLoading(true);
       
-      // Validar fechas
-      const startDate = new Date(formData.start_date);
-      const endDate = new Date(formData.end_date);
+      // Validar que no exista un año fiscal con el mismo nombre
+      const { data: existingByName, error: nameError } = await supabase
+        .from('accounting_periods')
+        .select('id, name')
+        .eq('name', formData.name)
+        .limit(1);
+        
+      if (nameError) throw nameError;
       
-      if (endDate < startDate) {
-        toast.error('La fecha de fin debe ser posterior a la fecha de inicio');
+      if (existingByName && existingByName.length > 0) {
+        toast.error(`Ya existe un año fiscal con el nombre "${formData.name}"`);
+        setLoading(false);
         return;
       }
+      
+      // Validar que no exista un año fiscal con fechas superpuestas
+      const { data: existingByDates, error: datesError } = await supabase
+        .from('accounting_periods')
+        .select('id, name, start_date, end_date')
+        .or(`start_date.lte.${formData.end_date},end_date.gte.${formData.start_date}`)
+        .is('is_month', false)
+        .not('fiscal_year_type', 'eq', formData.fiscal_year_type)
+        .limit(1);
+        
+      if (datesError) throw datesError;
+      
+      if (existingByDates && existingByDates.length > 0) {
+        const existing = existingByDates[0];
+        toast.error(`Las fechas se superponen con el año fiscal existente "${existing.name}" (${new Date(existing.start_date).toLocaleDateString()} - ${new Date(existing.end_date).toLocaleDateString()})`);
+        setLoading(false);
+        return;
+      }
+      
+      // Las fechas son generadas automáticamente según el tipo fiscal
+      // y no pueden ser editadas manualmente, por lo que no es necesario
+      // realizar validaciones adicionales
       
       // Crear año fiscal
       const { data, error } = await createFiscalYear(formData, user.id);
@@ -505,6 +581,46 @@ export function FiscalYearSettings() {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Función para inicializar el formulario con valores apropiados
+  const initializeFormData = (fiscalYearType: FiscalYearType = 'calendar') => {
+    const currentYear = new Date().getFullYear();
+    let startDate = '';
+    let endDate = '';
+    let yearName = '';
+    
+    // Configurar fechas según el tipo de año fiscal
+    switch (fiscalYearType) {
+      case 'calendar':
+        startDate = `${currentYear}-01-01`;
+        endDate = `${currentYear}-12-31`;
+        yearName = `Año Calendario ${currentYear}`;
+        break;
+      case 'fiscal_mar':
+        startDate = `${currentYear}-04-01`;
+        endDate = `${currentYear + 1}-03-31`;
+        yearName = `Año Fiscal Abr ${currentYear} - Mar ${currentYear + 1}`;
+        break;
+      case 'fiscal_jun':
+        startDate = `${currentYear}-07-01`;
+        endDate = `${currentYear + 1}-06-30`;
+        yearName = `Año Fiscal Jul ${currentYear} - Jun ${currentYear + 1}`;
+        break;
+      case 'fiscal_sep':
+        startDate = `${currentYear}-10-01`;
+        endDate = `${currentYear + 1}-09-30`;
+        yearName = `Año Fiscal Oct ${currentYear} - Sep ${currentYear + 1}`;
+        break;
+    }
+    
+    setFormData({
+      name: yearName,
+      start_date: startDate,
+      end_date: endDate,
+      notes: '',
+      fiscal_year_type: fiscalYearType
+    });
   };
 
   // Renderizar períodos mensuales para un año fiscal
@@ -619,7 +735,10 @@ export function FiscalYearSettings() {
         <h2 className="text-xl font-semibold text-gray-900">Gestión de Años Fiscales y Períodos</h2>
         <div>
           <button
-            onClick={() => setShowCreateModal(true)}
+            onClick={() => {
+              initializeFormData();
+              setShowCreateModal(true);
+            }}
             className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
           >
             <Plus className="mr-1 h-4 w-4" />
@@ -638,7 +757,10 @@ export function FiscalYearSettings() {
               Crea un nuevo año fiscal para comenzar a gestionar tus períodos contables.
             </p>
             <button
-              onClick={() => setShowCreateModal(true)}
+              onClick={() => {
+                initializeFormData();
+                setShowCreateModal(true);
+              }}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
             >
               <Plus className="mr-2 h-4 w-4" />
@@ -767,7 +889,13 @@ export function FiscalYearSettings() {
         onClose={() => setShowCreateModal(false)}
         isOpen={showCreateModal}
       >
-        <form onSubmit={handleSubmitCreateForm} className="space-y-4">
+        <form onSubmit={handleSubmitCreateForm} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
+          <div className="bg-blue-50 border-l-4 border-blue-400 p-3 rounded-md">
+            <p className="text-xs text-blue-700">
+              <strong>Nota:</strong> Las fechas se establecen automáticamente según el tipo de año fiscal seleccionado.
+            </p>
+          </div>
+        
           <div>
             <label htmlFor="name" className="block text-sm font-medium text-gray-700">
               Nombre del Año Fiscal
@@ -780,7 +908,6 @@ export function FiscalYearSettings() {
               value={formData.name}
               onChange={handleCreateFormChange}
               className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-              placeholder="ej. Año Fiscal 2023"
             />
           </div>
           
@@ -797,8 +924,16 @@ export function FiscalYearSettings() {
               className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
             >
               <option value="calendar">Año Calendario (Ene-Dic)</option>
-              <option value="custom">Personalizado</option>
+              <option value="fiscal_mar">Año Fiscal (Abr-Mar)</option>
+              <option value="fiscal_jun">Año Fiscal (Jul-Jun)</option>
+              <option value="fiscal_sep">Año Fiscal (Oct-Sep)</option>
             </select>
+            <p className="mt-1 text-xs text-gray-500">
+              {formData.fiscal_year_type === 'calendar' && 'Período: Enero a Diciembre (01/01/2023 - 31/12/2023)'}
+              {formData.fiscal_year_type === 'fiscal_mar' && 'Período: Abril a Marzo (01/04/2023 - 31/03/2024)'}
+              {formData.fiscal_year_type === 'fiscal_jun' && 'Período: Julio a Junio (01/07/2023 - 30/06/2024)'}
+              {formData.fiscal_year_type === 'fiscal_sep' && 'Período: Octubre a Septiembre (01/10/2023 - 30/09/2024)'}
+            </p>
           </div>
           
           <div className="grid grid-cols-2 gap-4">
@@ -813,7 +948,8 @@ export function FiscalYearSettings() {
                 required
                 value={formData.start_date}
                 onChange={handleCreateFormChange}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                disabled={true}
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-gray-50"
               />
             </div>
             
@@ -828,7 +964,8 @@ export function FiscalYearSettings() {
                 required
                 value={formData.end_date}
                 onChange={handleCreateFormChange}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+                disabled={true}
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-gray-50"
               />
             </div>
           </div>
@@ -840,15 +977,15 @@ export function FiscalYearSettings() {
             <textarea
               id="notes"
               name="notes"
-              rows={3}
+              rows={2}
               value={formData.notes}
               onChange={handleCreateFormChange}
               className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-              placeholder="Notas adicionales sobre este período mensual"
+              placeholder="Notas adicionales"
             />
           </div>
           
-          <div className="flex justify-end mt-6">
+          <div className="flex justify-end mt-4">
             <button
               type="button"
               onClick={() => setShowCreateModal(false)}
@@ -873,14 +1010,13 @@ export function FiscalYearSettings() {
         onClose={() => setShowReopenModal(false)}
         isOpen={showReopenModal}
       >
-        <div className="space-y-4">
-          <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 rounded-md">
+        <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
+          <div className="bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded-md">
             <div className="flex">
-              <AlertCircle className="h-5 w-5 text-yellow-400" />
-              <div className="ml-3">
-                <p className="text-sm text-yellow-700">
-                  Reabrir un año fiscal cerrado es una acción excepcional que debe usarse solo cuando sea absolutamente necesario.
-                  Esta acción quedará registrada en el sistema.
+              <AlertCircle className="h-4 w-4 text-yellow-400 mt-0.5" />
+              <div className="ml-2">
+                <p className="text-xs text-yellow-700">
+                  Esta acción excepcional quedará registrada en el sistema.
                 </p>
               </div>
             </div>
@@ -892,7 +1028,7 @@ export function FiscalYearSettings() {
             </label>
             <textarea
               id="reopen_reason"
-              rows={4}
+              rows={3}
               value={reopenReason}
               onChange={(e) => setReopenReason(e.target.value)}
               className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
@@ -901,7 +1037,7 @@ export function FiscalYearSettings() {
             />
           </div>
           
-          <div className="flex justify-end mt-6">
+          <div className="flex justify-end mt-4">
             <button
               type="button"
               onClick={() => {
@@ -921,7 +1057,7 @@ export function FiscalYearSettings() {
               disabled={!reopenReason.trim() || processingYearId !== null}
               className="px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-500 hover:bg-blue-700 disabled:opacity-50"
             >
-              Confirmar Reapertura
+              Confirmar
             </button>
           </div>
         </div>
