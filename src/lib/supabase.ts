@@ -74,6 +74,31 @@ const supabaseOptions = {
         const url = args[0] instanceof Request ? args[0].url : String(args[0]);
         console.log(`Iniciando petición a: ${url.split('?')[0]}`);
         
+        // Corregir problemas con peticiones a user_profiles y company_settings
+        if (url.includes('/user_profiles') && url.includes('id=eq.')) {
+          // Corregir formato de consulta para user_profiles
+          const newUrl = url.replace(/id=eq\.([^&]+)/, 'id=eq.$1');
+          args[0] = newUrl;
+        }
+        
+        // Corregir problema con campo 'logo' vs 'logo_url' en company_settings
+        if (url.includes('/company_settings') && args[1] && typeof args[1] === 'object') {
+          const options = args[1] as RequestInit;
+          if (options.method === 'PATCH' && options.body) {
+            try {
+              const body = JSON.parse(options.body as string);
+              // Si hay un campo 'logo', cambiarlo a 'logo_url'
+              if (body.logo !== undefined && body.logo_url === undefined) {
+                body.logo_url = body.logo;
+                delete body.logo;
+                options.body = JSON.stringify(body);
+              }
+            } catch (e) {
+              console.warn('Error al parsear body para corregir logo:', e);
+            }
+          }
+        }
+        
         // Aumentar el número de reintentos para operaciones críticas
         const isAccountsQuery = url.includes('/accounts');
         const maxRetries = isAccountsQuery ? 5 : 3;
