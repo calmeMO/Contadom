@@ -84,11 +84,11 @@ const supabaseOptions = {
         // Corregir problema con campo 'logo' vs 'logo_url' en company_settings
         if (url.includes('/company_settings') && args[1] && typeof args[1] === 'object') {
           const options = args[1] as RequestInit;
-          if (options.method === 'PATCH' && options.body) {
+          if ((options.method === 'PATCH' || options.method === 'POST') && options.body) {
             try {
               const body = JSON.parse(options.body as string);
               // Si hay un campo 'logo', cambiarlo a 'logo_url'
-              if (body.logo !== undefined && body.logo_url === undefined) {
+              if (body.logo !== undefined) {
                 body.logo_url = body.logo;
                 delete body.logo;
                 options.body = JSON.stringify(body);
