@@ -391,30 +391,120 @@ export async function createNextPeriod(currentPeriodId: string, userId: string) 
     startDate.setDate(startDate.getDate() + 1);
     
     const endDate = new Date(startDate);
+    
     // Si es período mensual
     if (currentPeriod.period_type === 'monthly') {
       endDate.setMonth(endDate.getMonth() + 1);
       endDate.setDate(0); // Último día del mes
     } else {
-      // Si es período anual
-      endDate.setFullYear(endDate.getFullYear() + 1);
-      endDate.setDate(endDate.getDate() - 1);
+      // Si es período anual, considerar el tipo de año fiscal
+      const fiscalYearType = currentPeriod.fiscal_year_type || 'calendar';
+      
+      switch (fiscalYearType) {
+        case 'calendar': // Enero a Diciembre
+          // Si estamos en diciembre, el siguiente año fiscal comienza en enero
+          if (startDate.getMonth() === 0) { // Enero (0-indexed)
+            endDate.setMonth(11); // Diciembre
+            endDate.setDate(31);
+          } else {
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setMonth(startDate.getMonth() - 1);
+            endDate.setDate(startDate.getDate() - 1);
+          }
+          break;
+          
+        case 'fiscal_mar': // Abril a Marzo
+          // Si estamos en marzo, el siguiente año fiscal comienza en abril
+          if (startDate.getMonth() === 3) { // Abril (0-indexed)
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setMonth(2); // Marzo
+            endDate.setDate(31);
+          } else {
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setMonth(startDate.getMonth() - 1);
+            endDate.setDate(startDate.getDate() - 1);
+          }
+          break;
+          
+        case 'fiscal_jun': // Julio a Junio
+          // Si estamos en julio, el siguiente año fiscal comienza en julio
+          if (startDate.getMonth() === 6) { // Julio (0-indexed)
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setMonth(5); // Junio
+            endDate.setDate(30);
+          } else {
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setMonth(startDate.getMonth() - 1);
+            endDate.setDate(startDate.getDate() - 1);
+          }
+          break;
+          
+        case 'fiscal_sep': // Octubre a Septiembre
+          // Si estamos en octubre, el siguiente año fiscal comienza en octubre
+          if (startDate.getMonth() === 9) { // Octubre (0-indexed)
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setMonth(8); // Septiembre
+            endDate.setDate(30);
+          } else {
+            endDate.setFullYear(endDate.getFullYear() + 1);
+            endDate.setMonth(startDate.getMonth() - 1);
+            endDate.setDate(startDate.getDate() - 1);
+          }
+          break;
+          
+        default:
+          // Por defecto, año normal
+          endDate.setFullYear(endDate.getFullYear() + 1);
+          endDate.setDate(endDate.getDate() - 1);
+      }
     }
     
     // Formatear fechas como strings YYYY-MM-DD
     const startDateStr = startDate.toISOString().split('T')[0];
     const endDateStr = endDate.toISOString().split('T')[0];
     
+    // Generar nombre adecuado según el tipo de período y año fiscal
+    let periodName = '';
+    
+    if (currentPeriod.period_type === 'monthly') {
+      // Para períodos mensuales, usar año-mes
+      periodName = `Período ${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}`;
+    } else {
+      // Para años fiscales, incluir el rango de fechas
+      const startYear = startDate.getFullYear();
+      const endYear = endDate.getFullYear();
+      
+      const fiscalYearType = currentPeriod.fiscal_year_type || 'calendar';
+      
+      switch (fiscalYearType) {
+        case 'calendar':
+          periodName = `Año Fiscal ${startYear}`;
+          break;
+        case 'fiscal_mar':
+          periodName = `Año Fiscal Abr ${startYear} - Mar ${endYear}`;
+          break;
+        case 'fiscal_jun':
+          periodName = `Año Fiscal Jul ${startYear} - Jun ${endYear}`;
+          break;
+        case 'fiscal_sep':
+          periodName = `Año Fiscal Oct ${startYear} - Sep ${endYear}`;
+          break;
+        default:
+          periodName = `Año Fiscal ${startYear}-${endYear}`;
+      }
+    }
+    
     // Crear nuevo período
     const { data: newPeriod, error: newPeriodError } = await supabase
       .from('accounting_periods')
       .insert({
-        name: `Período ${startDate.getFullYear()}-${String(startDate.getMonth() + 1).padStart(2, '0')}`,
+        name: periodName,
         start_date: startDateStr,
         end_date: endDateStr,
         is_active: true,
         is_closed: false,
         period_type: currentPeriod.period_type,
+        fiscal_year_type: currentPeriod.fiscal_year_type,
         fiscal_year_id: currentPeriod.fiscal_year_id,
         created_by: userId
       })
