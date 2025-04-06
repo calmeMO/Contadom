@@ -534,21 +534,14 @@ export function Accounts() {
       </div>
 
       {showForm && (
-        <div className="bg-white shadow sm:rounded-lg">
-          <div className="px-4 py-5 sm:p-6">
-            <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
-              {selectedAccount ? 'Editar Cuenta' : 'Nueva Cuenta'}
-            </h3>
-            <AccountForm
-              account={selectedAccount}
-              onSuccess={handleFormSuccess}
-              onCancel={() => {
-                setShowForm(false);
-                setSelectedAccount(undefined);
-              }}
-            />
-          </div>
-        </div>
+        <AccountForm
+          account={selectedAccount}
+          onSuccess={handleFormSuccess}
+          onCancel={() => {
+            setShowForm(false);
+            setSelectedAccount(undefined);
+          }}
+        />
       )}
 
       {/* Filtros y búsqueda */}

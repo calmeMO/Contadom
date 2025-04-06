@@ -1,18 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { toast } from 'react-toastify';
 import { supabase } from '../../lib/supabase';
+import { FiscalYearType } from '../../types/database';
+import { AlertCircle, InfoIcon } from 'lucide-react';
 
 export function CompanySettings() {
   const [loading, setLoading] = useState(false);
   const [companyData, setCompanyData] = useState({
-    name: '',
+    company_name: '',
     taxId: '',
     address: '',
     phone: '',
     email: '',
     website: '',
-    logo: ''
+    logo_url: '',
+    fiscal_year_type: 'calendar' as FiscalYearType
   });
+  const [fiscalYearTypeIsSet, setFiscalYearTypeIsSet] = useState(false);
 
   useEffect(() => {
     fetchCompanyData();
@@ -31,15 +35,30 @@ export function CompanySettings() {
       }
 
       if (data) {
+        console.log('Datos de compañía recibidos:', data);
+        
         setCompanyData({
-          name: data.name || '',
+          company_name: data.company_name || '',
           taxId: data.tax_id || '',
           address: data.address || '',
           phone: data.phone || '',
           email: data.email || '',
           website: data.website || '',
-          logo: data.logo || ''
+          logo_url: data.logo_url || '',
+          fiscal_year_type: data.fiscal_year_type || 'calendar'
         });
+        
+        // Solo bloquear si ya se ha guardado explícitamente un valor
+        // Verifica si la propiedad existe y no es null/undefined/string vacío
+        const hasFiscalYearType = 
+          data.fiscal_year_type !== null && 
+          data.fiscal_year_type !== undefined && 
+          data.fiscal_year_type !== '';
+        
+        console.log('¿Tiene tipo de año fiscal establecido?', hasFiscalYearType);
+        
+        // Establecer el estado de bloqueo según si hay un valor guardado
+        setFiscalYearTypeIsSet(hasFiscalYearType);
       }
     } catch (error) {
       console.error('Error fetching company data:', error);
@@ -49,7 +68,7 @@ export function CompanySettings() {
     }
   }
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
     setCompanyData({
       ...companyData,
@@ -65,42 +84,52 @@ export function CompanySettings() {
       
       const { data, error } = await supabase
         .from('company_settings')
-        .select('id');
+        .select('id, fiscal_year_type');
       
       const companyExists = data && data.length > 0;
       
       let result;
       if (companyExists) {
+        // Si la empresa ya existe, usar el valor seleccionado (que puede ser nuevo si aún no se ha establecido)
         result = await supabase
           .from('company_settings')
           .update({
-            name: companyData.name,
+            company_name: companyData.company_name,
             tax_id: companyData.taxId,
             address: companyData.address,
             phone: companyData.phone,
             email: companyData.email,
             website: companyData.website,
-            logo: companyData.logo,
+            logo_url: companyData.logo_url,
+            fiscal_year_type: companyData.fiscal_year_type,
             updated_at: new Date().toISOString()
           })
           .eq('id', data[0].id);
       } else {
+        // Si es un nuevo registro, usar el valor seleccionado
         result = await supabase
           .from('company_settings')
           .insert([{
-            name: companyData.name,
+            company_name: companyData.company_name,
             tax_id: companyData.taxId,
             address: companyData.address,
             phone: companyData.phone,
             email: companyData.email,
             website: companyData.website,
-            logo: companyData.logo
+            logo_url: companyData.logo_url,
+            fiscal_year_type: companyData.fiscal_year_type
           }]);
       }
       
       if (result.error) throw result.error;
       
       toast.success('Datos de la empresa actualizados exitosamente');
+      
+      // Después de guardar, bloquear el selector de tipo fiscal
+      setFiscalYearTypeIsSet(true);
+      
+      // Recargar los datos para verificar el estado
+      fetchCompanyData();
     } catch (error) {
       console.error('Error updating company data:', error);
       toast.error('Error al actualizar los datos de la empresa');
@@ -120,16 +149,16 @@ export function CompanySettings() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div>
               <label 
-                htmlFor="name" 
+                htmlFor="company_name" 
                 className="block text-sm font-medium text-gray-700"
               >
                 Nombre de la Empresa *
               </label>
               <input
                 type="text"
-                name="name"
-                id="name"
-                value={companyData.name}
+                name="company_name"
+                id="company_name"
+                value={companyData.company_name}
                 onChange={handleInputChange}
                 required
                 className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
@@ -223,6 +252,49 @@ export function CompanySettings() {
               onChange={handleInputChange}
               className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
             />
+          </div>
+          
+          <div>
+            <label 
+              htmlFor="fiscal_year_type" 
+              className="block text-sm font-medium text-gray-700"
+            >
+              Tipo de Año Fiscal *
+            </label>
+            <div className="flex items-center mb-2">
+              <AlertCircle className="h-4 w-4 text-amber-500 mr-1" />
+              <p className="text-xs text-amber-700">
+                {fiscalYearTypeIsSet 
+                  ? 'Este valor no puede ser modificado una vez establecido.' 
+                  : 'Una vez guardado, este valor no podrá ser modificado posteriormente.'}
+              </p>
+            </div>
+            <select
+              name="fiscal_year_type"
+              id="fiscal_year_type"
+              value={companyData.fiscal_year_type}
+              onChange={handleInputChange}
+              disabled={fiscalYearTypeIsSet}
+              className={`mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm ${fiscalYearTypeIsSet ? 'bg-gray-100' : ''}`}
+              required
+            >
+              <option value="calendar">Año Calendario (Ene-Dic)</option>
+              <option value="fiscal_mar">Año Fiscal (Abr-Mar)</option>
+              <option value="fiscal_jun">Año Fiscal (Jul-Jun)</option>
+              <option value="fiscal_sep">Año Fiscal (Oct-Sep)</option>
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              {companyData.fiscal_year_type === 'calendar' && 'Período: Enero a Diciembre (01/01 - 31/12)'}
+              {companyData.fiscal_year_type === 'fiscal_mar' && 'Período: Abril a Marzo (01/04 - 31/03)'}
+              {companyData.fiscal_year_type === 'fiscal_jun' && 'Período: Julio a Junio (01/07 - 30/06)'}
+              {companyData.fiscal_year_type === 'fiscal_sep' && 'Período: Octubre a Septiembre (01/10 - 30/09)'}
+            </p>
+            {!fiscalYearTypeIsSet && (
+              <p className="mt-1 text-xs text-blue-600">
+                Importante: Seleccione el tipo de año fiscal según el código tributario 11-92.
+                Este valor define cómo se crearán y manejarán todos los períodos fiscales del sistema.
+              </p>
+            )}
           </div>
           
           <div>

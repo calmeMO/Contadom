@@ -80,14 +80,16 @@ export function Balance() {
           account_id,
           debit,
           credit,
-          journal_entry:journal_entries(date, is_adjustment)
+          journal_entries!inner(id, date, is_adjustment, is_approved, status)
         `)
-        .gte('journal_entry.date', periodData.start_date)
-        .lte('journal_entry.date', periodData.end_date);
+        .gte('journal_entries.date', periodData.start_date)
+        .lte('journal_entries.date', periodData.end_date)
+        .eq('journal_entries.is_approved', true)
+        .neq('journal_entries.status', 'voided');
 
       // Para balanza normal, excluyendo ajustes
       if (!showAdjusted) {
-        query = query.eq('journal_entry.is_adjustment', false);
+        query = query.eq('journal_entries.is_adjustment', false);
       }
       
       const { data: allMovements, error: movementsError } = await query;

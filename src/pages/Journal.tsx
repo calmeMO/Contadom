@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { toast } from 'react-toastify';
 import { format, parseISO } from 'date-fns';
@@ -6,23 +6,34 @@ import { v4 as uuidv4 } from 'uuid';
 import { 
   Plus, 
   FileEdit, 
-  Trash2, 
   Copy, 
   Eye, 
   Check,
   Search,
   ArrowUpDown,
   XCircle,
-  Info
+  Info,
+  Edit,
+  CheckCircle,
+  ChevronLeft,
+  ChevronRight,
+  FileDown,
+  FilePlus,
+  Filter,
+  Gift,
+  History,
+  Settings,
+  Shield,
+  Table
 } from 'lucide-react';
 import JournalEntryForm from '../components/JournalEntryForm';
 import Modal from '../components/ui/Modal';
 import { useLocation } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
 import { 
   fetchJournalEntries, 
   getJournalEntry, 
   approveJournalEntry, 
-  deleteJournalEntry,
   cancelJournalEntry,
   JournalEntryItem,
   JournalEntry,
@@ -80,7 +91,7 @@ const adjustmentTypeShort = (type: AdjustmentType | null | undefined): string =>
 
 export default function Journal() {
   const location = useLocation();
-  const [user, setUser] = useState<any>(null);
+  const { user } = useAuth();
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [accounts, setAccounts] = useState<any[]>([]);
   const [fiscalYears, setFiscalYears] = useState<any[]>([]);
@@ -117,15 +128,6 @@ export default function Journal() {
     }
   }, [location.search]);
 
-  // Obtener el usuario actual
-  useEffect(() => {
-    const getUserData = async () => {
-      const { data } = await supabase.auth.getUser();
-      setUser(data.user);
-    };
-    getUserData();
-  }, []);
-  
   // Cargar asientos contables
   const fetchEntries = async () => {
     try {
@@ -239,187 +241,338 @@ export default function Journal() {
     setModalVisible(true);
   };
 
-  // Editar asiento
-  const handleEdit = async (id: string) => {
+  // Ver detalles de asiento
+  const handleView = async (id: string) => {
     try {
+      // Iniciar loading
       setLoading(true);
+      
+      console.log('⏳ Iniciando acción VER asiento ID:', id);
+      
+      // Obtener datos del asiento con el formato original
       const { entry, items, error } = await getJournalEntry(id);
       
-      if (error) throw error;
-      
-      if (entry && items) {
-        setCurrentEntry(entry);
-        setCurrentEntryItems(items);
-        setModalMode(entry.is_adjustment ? 'edit-adjustment' : 'edit');
-        setModalVisible(true);
+      // Manejar error en la obtención de datos
+      if (error) {
+        console.error('❌ Error al cargar detalles del asiento:', error);
+        toast.error(`Error al cargar asiento: ${error.message || 'Error desconocido'}`);
+        return;
       }
+      
+      // Verificar que existan los datos
+      if (!entry) {
+        console.error('❌ No se encontró el asiento solicitado');
+        toast.error('No se encontró el asiento solicitado');
+        return;
+      }
+      
+      console.log('✅ Asiento cargado correctamente - ID:', id, 'Número:', entry.entry_number);
+      console.log('✅ Datos de cabecera del asiento:', entry);
+      console.log('✅ Líneas del asiento (cantidad):', items?.length || 0);
+      
+      // Cargar datos en el estado
+      setCurrentEntry(entry);
+      setCurrentEntryItems(items || []);
+      
+      // Configurar modo visualización
+      setModalMode('view');
+      
+      // Mostrar modal
+      setModalVisible(true);
+      
     } catch (error: any) {
-      console.error('Error al cargar asiento:', error);
+      console.error('❌ Error no controlado al cargar asiento:', error);
       toast.error(`Error: ${error.message || 'No se pudo cargar el asiento'}`);
     } finally {
+      // Finalizar loading
       setLoading(false);
     }
   };
 
-  // Ver detalles de asiento
-  const handleView = async (id: string) => {
+  // Editar asiento
+  const handleEdit = async (id: string) => {
+    // Verificar autenticación
+    if (!user?.id) {
+      toast.warn('Debe iniciar sesión para editar asientos');
+      return;
+    }
+    
+    // Verificar permisos
+    if (user.role !== 'admin' && user.role !== 'accountant') {
+      toast.warn('No tiene permisos para editar asientos');
+      return;
+    }
+    
     try {
+      // Iniciar loading
       setLoading(true);
+      
+      console.log('⏳ Iniciando acción EDITAR asiento ID:', id);
+      
+      // Obtener datos del asiento con el formato original
       const { entry, items, error } = await getJournalEntry(id);
       
-      if (error) throw error;
-      
-      if (entry && items) {
-        setCurrentEntry(entry);
-        setCurrentEntryItems(items);
-        setModalMode('view');
-        setModalVisible(true);
+      // Manejar error en la obtención de datos
+      if (error) {
+        console.error('❌ Error al cargar asiento para edición:', error);
+        toast.error(`Error al cargar asiento: ${error.message || 'Error desconocido'}`);
+        return;
       }
+      
+      // Verificar que exista el asiento
+      if (!entry) {
+        console.error('❌ No se encontró el asiento solicitado');
+        toast.error('No se encontró el asiento solicitado');
+        return;
+      }
+      
+      // Verificar que el asiento no esté aprobado
+      if (entry.is_approved || entry.status === 'aprobado') {
+        console.error('❌ No se puede editar un asiento aprobado');
+        toast.error('No se puede editar un asiento aprobado');
+        return;
+      }
+      
+      // Verificar que el asiento no esté voided
+      if (entry.status === 'voided') {
+        console.error('❌ No se puede editar un asiento anulado');
+        toast.error('No se puede editar un asiento anulado');
+        return;
+      }
+      
+      // Log para depuración - Ver si hay líneas del asiento
+      console.log('✅ Asiento cargado para edición - ID:', id, 'Número:', entry.entry_number);
+      console.log('✅ Datos de cabecera:', entry);
+      
+      if (!items || items.length === 0) {
+        console.warn('⚠️ No se encontraron líneas para este asiento');
+        toast.warning('No se encontraron líneas de detalle para este asiento');
+      } else {
+        console.log(`✅ Se encontraron ${items.length} líneas para el asiento`);
+        items.forEach((item, index) => {
+          console.log(`  Línea ${index + 1}:`, item);
+          console.log(`    Cuenta: ${item.account_id}, Débito: ${item.debit}, Crédito: ${item.credit}`);
+        });
+      }
+      
+      // Cargar datos en el estado
+      setCurrentEntry(entry);
+      setCurrentEntryItems(items || []);
+      
+      // Configurar modo edición según tipo de asiento
+      setModalMode(entry.is_adjustment ? 'edit-adjustment' : 'edit');
+      
+      // Mostrar modal
+      setModalVisible(true);
+      
     } catch (error: any) {
-      console.error('Error al cargar asiento:', error);
-      toast.error(`Error: ${error.message || 'No se pudo cargar el asiento'}`);
+      console.error('❌ Error no controlado al editar asiento:', error);
+      toast.error(`Error: ${error.message || 'No se pudo cargar el asiento para editar'}`);
     } finally {
+      // Finalizar loading
       setLoading(false);
     }
   };
 
   // Aprobar asiento
   const handleApprove = async (id: string) => {
+    // Verificar autenticación
     if (!user?.id) {
-        toast.warn('Debe iniciar sesión para aprobar asientos.');
-        return;
+      toast.warn('Debe iniciar sesión para aprobar asientos');
+      return;
     }
+    
+    // Verificar permisos (solo administradores)
+    if (user.role !== 'admin') {
+      toast.warn('Solo los administradores pueden aprobar asientos');
+      return;
+    }
+    
     try {
-      const confirmed = window.confirm('¿Está seguro de aprobar este asiento contable?');
+      // Iniciar loading
+      setLoading(true);
+      
+      console.log('⏳ Iniciando acción APROBAR asiento ID:', id);
+      
+      // Obtener datos del asiento para verificación con formato original
+      const { entry, error: checkError } = await getJournalEntry(id);
+      
+      // Manejar error en la verificación
+      if (checkError) {
+        console.error('❌ Error al verificar asiento existente:', checkError);
+        toast.error(`Error al verificar asiento: ${checkError.message || 'Error desconocido'}`);
+        return;
+      }
+      
+      // Verificar que exista el asiento
+      if (!entry) {
+        console.error('❌ No se encontró el asiento solicitado');
+        toast.error('No se encontró el asiento solicitado');
+        return;
+      }
+      
+      // Verificar que el asiento no esté ya aprobado
+      if (entry.is_approved || entry.status === 'aprobado') {
+        console.error('❌ El asiento ya se encuentra aprobado');
+        toast.error('El asiento ya se encuentra aprobado');
+        return;
+      }
+      
+      // Verificar que el asiento no esté voided
+      if (entry.status === 'voided') {
+        console.error('❌ No se puede aprobar un asiento anulado');
+        toast.error('No se puede aprobar un asiento anulado');
+        return;
+      }
+      
+      // Solicitar confirmación
+      const confirmed = window.confirm('¿Está seguro de aprobar este asiento? Una vez aprobado, no podrá editarlo ni eliminarlo.');
       if (!confirmed) return;
       
-      setLoading(true);
+      // Ejecutar aprobación
       const { error } = await approveJournalEntry(id, user.id);
       
-      if (error) throw error;
+      // Manejar error en la aprobación
+      if (error) {
+        console.error('❌ Error al aprobar asiento:', error);
+        toast.error(`Error al aprobar asiento: ${error.message || 'Error desconocido'}`);
+        return;
+      }
       
+      console.log('✅ Asiento aprobado correctamente - ID:', id, 'Número:', entry.entry_number);
+      
+      // Notificar éxito
       toast.success('Asiento aprobado correctamente');
+      
+      // Actualizar lista de asientos
       fetchEntries();
+      
     } catch (error: any) {
-      console.error('Error al aprobar asiento:', error);
-      toast.error(`Error: ${error.message || 'Error desconocido'}`);
+      console.error('❌ Error no controlado al aprobar asiento:', error);
+      toast.error(`Error: ${error.message || 'Error al procesar la aprobación'}`);
     } finally {
+      // Finalizar loading
       setLoading(false);
     }
   };
 
-  // Eliminar asiento
-  const handleDelete = async (id: string) => {
+  // Anular asiento (mostrar modal)
+  const handleCancel = async (id: string, entry_number: string) => {
+    // Verificar autenticación
+    if (!user?.id) {
+      toast.warn('Debe iniciar sesión para anular asientos');
+      return;
+    }
+    
+    // Verificar permisos (solo administradores)
+    if (user.role !== 'admin') {
+      toast.warn('Solo los administradores pueden anular asientos');
+      return;
+    }
+    
     try {
-      const confirmed = window.confirm('¿Está seguro de eliminar este asiento contable? Esta acción no se puede deshacer.');
-      if (!confirmed) return;
+      console.log('⏳ Iniciando acción ANULAR asiento ID:', id, 'Número:', entry_number);
       
-      setLoading(true);
-      const { error } = await deleteJournalEntry(id);
+      // Obtener datos del asiento para verificación con formato original
+      const { entry, error: checkError } = await getJournalEntry(id);
       
-      if (error) throw error;
+      // Manejar error en la verificación
+      if (checkError) {
+        console.error('❌ Error al verificar asiento existente:', checkError);
+        toast.error(`Error al verificar asiento: ${checkError.message || 'Error desconocido'}`);
+        return;
+      }
       
-      toast.success('Asiento contable eliminado correctamente');
-      fetchEntries();
+      // Verificar que exista el asiento
+      if (!entry) {
+        console.error('❌ No se encontró el asiento solicitado');
+        toast.error('No se encontró el asiento solicitado');
+        return;
+      }
+      
+      // Verificar que el asiento esté aprobado
+      if (!entry.is_approved && entry.status !== 'aprobado') {
+        console.error('❌ Solo se pueden anular asientos aprobados');
+        toast.error('Solo se pueden anular asientos aprobados');
+        return;
+      }
+      
+      // Verificar que el asiento no esté voided
+      if (entry.status === 'voided') {
+        console.error('❌ El asiento ya se encuentra anulado');
+        toast.error('El asiento ya se encuentra anulado');
+        return;
+      }
+      
+      console.log('✅ Preparando anulación - ID:', id, 'Número:', entry.entry_number);
+      
+      // Preparar el modal de anulación
+      setEntryToCancel(id);
+      setCancelReason('');
+      setCancelModalVisible(true);
+      
     } catch (error: any) {
-      console.error('Error al eliminar asiento:', error);
-      toast.error(`Error: ${error.message || 'No se pudo eliminar el asiento'}`);
-    } finally {
-      setLoading(false);
+      console.error('❌ Error no controlado al preparar anulación de asiento:', error);
+      toast.error(`Error: ${error.message || 'Error al preparar la anulación'}`);
     }
-  };
-
-  // Abrir modal para anular asiento
-  const handleCancel = (id: string) => {
-    setEntryToCancel(id);
-    setCancelReason('');
-    setCancelModalVisible(true);
   };
 
   // Confirmar anulación de asiento
   const handleCancelConfirm = async () => {
+    // Verificar que tengamos ID de asiento y usuario
     if (!entryToCancel || !user?.id) {
-        toast.warn('No se puede anular el asiento sin ID o usuario.');
-        return;
-    }
-    if (!cancelReason.trim()) {
-      toast.error('Debe ingresar un motivo para la anulación.');
+      toast.warn('No se puede procesar la anulación: falta ID de asiento o usuario');
       return;
     }
     
-    setLoading(true);
+    // Verificar que se ha ingresado un motivo
+    if (!cancelReason.trim()) {
+      toast.error('Debe ingresar un motivo para la anulación');
+      return;
+    }
+    
     try {
-      const { error } = await cancelJournalEntry(entryToCancel, user.id, cancelReason);
-      if (error) throw error;
+      // Iniciar loading
+      setLoading(true);
       
+      console.log('⏳ Confirmando anulación de asiento ID:', entryToCancel, 'Motivo:', cancelReason);
+      
+      // Ejecutar anulación
+      const { error } = await cancelJournalEntry(entryToCancel, user.id, cancelReason);
+      
+      // Manejar error en la anulación
+      if (error) {
+        console.error('❌ Error al anular asiento:', error);
+        
+        // Mostrar mensajes específicos según el tipo de error
+        if (error.message?.includes('permission') || error.message?.includes('no tiene')) {
+          toast.error(`Error de permisos: ${error.message}. Contacte al administrador del sistema.`);
+        } else if (error.message?.includes('trigger')) {
+          toast.error('Error en la base de datos. Esta operación requiere privilegios de administrador.');
+        } else {
+          toast.error(`Error al anular asiento: ${error.message || 'Error desconocido'}`);
+        }
+        return;
+      }
+      
+      console.log('✅ Asiento anulado correctamente - ID:', entryToCancel, 'Motivo:', cancelReason);
+      
+      // Notificar éxito
       toast.success('Asiento anulado correctamente');
+      
+      // Cerrar modal y limpiar estado
       setCancelModalVisible(false);
-      fetchEntries();
-    } catch (error: any) {
-      console.error('Error al anular asiento:', error);
-      toast.error(`Error al anular: ${error.message || 'Error desconocido'}`);
-    } finally {
-      setLoading(false);
       setEntryToCancel(null);
       setCancelReason('');
-    }
-  };
-
-  // Duplicar asiento
-  const handleDuplicate = async (id: string) => {
-    try {
-      setLoading(true);
-      const { entry, items, error } = await getJournalEntry(id);
-      if (error) throw error;
       
-      if (entry && items) {
-        // Crear copia sin ID, número y con fecha actual
-        // Usar Partial<JournalEntry> para el objeto temporal
-        const newEntryData: Partial<JournalEntry> = {
-          // Copiar campos relevantes, omitir IDs y estados
-          date: format(new Date(), 'yyyy-MM-dd'),
-          description: `Copia de: ${entry.description}`,
-          accounting_period_id: entry.accounting_period_id,
-          monthly_period_id: currentMonthlyPeriodId || entry.monthly_period_id,
-          notes: entry.notes,
-          reference_number: entry.reference_number,
-          reference_date: entry.reference_date,
-          // Importante: Definir explícitamente los campos que deben ser null o false
-          is_adjustment: false, 
-          adjustment_type: null,
-          adjusted_entry_id: null,
-          status: 'pendiente', 
-          is_approved: false,
-          is_posted: false,
-          // No incluir campos de auditoría como created_by, created_at, etc.
-        };
-        
-        // Crear copia de las líneas sin IDs
-        const newItemsData = items.map((item: JournalEntryItem) => ({
-          // Copiar campos relevantes de la línea
-          account_id: item.account_id,
-          description: item.description,
-          debit: item.debit,
-          credit: item.credit,
-          is_debit: item.is_debit,
-          amount: item.amount,
-          // Generar nuevo temp_id
-          temp_id: uuidv4() 
-        }));
-        
-        // Pasar el objeto parcial al estado, el formulario lo completará
-        setCurrentEntry(newEntryData as JournalEntry); // Asumir que el form lo manejará
-        setCurrentEntryItems(newItemsData);
-        // Abrir en modo creación normal
-        setModalMode('create'); 
-        setModalVisible(true);
-      } else {
-          toast.error('No se encontraron datos para duplicar el asiento.');
-      }
+      // Actualizar lista de asientos
+      fetchEntries();
+      
     } catch (error: any) {
-      console.error('Error al duplicar asiento:', error);
-      toast.error(`Error al duplicar: ${error.message || 'Error desconocido'}`);
+      console.error('❌ Excepción no controlada al anular asiento:', error);
+      toast.error(`Error inesperado: ${error.message || 'Error al procesar la anulación'}`);
     } finally {
+      // Finalizar loading
       setLoading(false);
     }
   };
@@ -460,6 +613,38 @@ export default function Journal() {
       setSortOrder('asc');
     }
   };
+
+  // Depurar información del usuario y estado de asientos
+  useEffect(() => {
+    if (entries.length > 0 && user) {
+      console.log('Información de depuración:');
+      console.log('Usuario actual:', user);
+      console.log('Rol de usuario:', user.role);
+      console.log('ID de usuario:', user.id);
+      console.log('Número de asientos:', entries.length);
+      
+      // Mostrar ejemplos de asientos con diferentes estados
+      const pendientes = entries.filter(e => e.status === 'pendiente');
+      const aprobados = entries.filter(e => e.status === 'aprobado');
+      const anulados = entries.filter(e => e.status === 'voided');
+      
+      console.log('Asientos pendientes:', pendientes.length);
+      console.log('Asientos aprobados:', aprobados.length);
+      console.log('Asientos anulados:', anulados.length);
+      
+      if (pendientes.length > 0) {
+        console.log('Ejemplo de asiento pendiente:', pendientes[0]);
+      }
+      
+      if (aprobados.length > 0) {
+        console.log('Ejemplo de asiento aprobado:', aprobados[0]);
+      }
+      
+      if (anulados.length > 0) {
+        console.log('Ejemplo de asiento anulado:', anulados[0]);
+      }
+    }
+  }, [entries, user]);
 
   return (
     <div className="container mx-auto p-4 space-y-6">
@@ -616,24 +801,44 @@ export default function Journal() {
                         ${entry.status === 'aprobado' ? 'bg-green-100 text-green-800' : 
                           entry.status === 'voided' ? 'bg-red-100 text-red-800' : 
                           'bg-yellow-100 text-yellow-800'}`}
-                      >{entry.status}</span>
+                      >
+                        {entry.status === 'voided' ? 'Anulado' : entry.status}
+                      </span>
                     </td>
                     <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
                       <div className="flex justify-center items-center space-x-1">
-                        <button onClick={() => handleView(entry.id)} className="p-1 text-gray-500 hover:text-gray-700" title="Ver Detalles"><Eye size={16} /></button>
-                        {(entry.status === 'pendiente') && (
-                            <button onClick={() => handleEdit(entry.id)} className="p-1 text-blue-600 hover:text-blue-800" title="Editar"><FileEdit size={16} /></button>
+                        {/* Botón de Editar - solo visible para asientos pendientes */}
+                        {entry.status === 'pendiente' && (
+                          <button 
+                            onClick={() => handleEdit(entry.id)} 
+                            className="p-1 text-blue-500 hover:text-blue-700 hover:bg-blue-100 rounded-full" 
+                            title="Editar Asiento"
+                          >
+                            <Edit size={16} />
+                          </button>
                         )}
-                        {(entry.status === 'pendiente') && (
-                            <button onClick={() => handleApprove(entry.id)} className="p-1 text-green-600 hover:text-green-800" title="Aprobar"><Check size={16} /></button>
+
+                        {/* Botón de Aprobar - solo visible para administradores y asientos pendientes */}
+                        {user?.role === 'admin' && entry.status === 'pendiente' && (
+                          <button 
+                            onClick={() => handleApprove(entry.id)} 
+                            className="p-1 text-green-500 hover:text-green-700 hover:bg-green-100 rounded-full" 
+                            title="Aprobar Asiento"
+                          >
+                            <CheckCircle size={16} />
+                          </button>
                         )}
-                        {(entry.status === 'pendiente') && (
-                            <button onClick={() => handleDelete(entry.id)} className="p-1 text-red-600 hover:text-red-800" title="Eliminar"><Trash2 size={16} /></button>
+
+                        {/* Botón de Anular - solo visible para administradores y asientos aprobados */}
+                        {user?.role === 'admin' && entry.status === 'aprobado' && (
+                          <button 
+                            onClick={() => handleCancel(entry.id, entry.entry_number)} 
+                            className="p-1 text-yellow-500 hover:text-yellow-700 hover:bg-yellow-100 rounded-full" 
+                            title="Anular Asiento"
+                          >
+                            <XCircle size={16} />
+                          </button>
                         )}
-                         {(entry.status === 'aprobado') && (
-                             <button onClick={() => handleCancel(entry.id)} className="p-1 text-orange-600 hover:text-orange-800" title="Anular"><XCircle size={16} /></button>
-                         )}
-                        <button onClick={() => handleDuplicate(entry.id)} className="p-1 text-purple-600 hover:text-purple-800" title="Duplicar"><Copy size={16} /></button>
                       </div>
                     </td>
                   </tr>

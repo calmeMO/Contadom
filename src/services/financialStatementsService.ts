@@ -9,11 +9,13 @@ export interface FinancialData {
   equity: FinancialAccount[];
   revenue: FinancialAccount[];
   expenses: FinancialAccount[];
+  costs: FinancialAccount[];
   totalAssets: number;
   totalLiabilities: number;
   totalEquity: number;
   totalRevenue: number;
   totalExpenses: number;
+  totalCosts: number;
   netIncome: number;
 }
 
@@ -61,12 +63,12 @@ export async function fetchFinancialData(periodId: string): Promise<FinancialDat
         account_id,
         debit,
         credit,
-        journal_entry:journal_entries(date, is_adjustment, is_approved, status)
+        journal_entries!inner(id, date, is_adjustment, is_approved, status)
       `)
-      .gte('journal_entry.date', periodDetails.start_date)
-      .lte('journal_entry.date', periodDetails.end_date)
-      .eq('journal_entry.is_approved', true)
-      .eq('journal_entry.status', 'aprobado');
+      .gte('journal_entries.date', periodDetails.start_date)
+      .lte('journal_entries.date', periodDetails.end_date)
+      .eq('journal_entries.is_approved', true)
+      .neq('journal_entries.status', 'voided');
 
     if (movementsError) throw movementsError;
 
@@ -114,11 +116,13 @@ export async function fetchFinancialData(periodId: string): Promise<FinancialDat
       equity: [],
       revenue: [],
       expenses: [],
+      costs: [],
       totalAssets: 0,
       totalLiabilities: 0,
       totalEquity: 0,
       totalRevenue: 0,
       totalExpenses: 0,
+      totalCosts: 0,
       netIncome: 0,
     };
 
@@ -150,16 +154,19 @@ export async function fetchFinancialData(periodId: string): Promise<FinancialDat
             financialData.totalRevenue += account.balance;
             break;
           case 'gasto':
-          case 'costo':
             financialData.expenses.push(financialAccount);
             financialData.totalExpenses += account.balance;
+            break;
+          case 'costo':
+            financialData.costs.push(financialAccount);
+            financialData.totalCosts += account.balance;
             break;
         }
       }
     });
 
-    // Calcular utilidad neta
-    financialData.netIncome = financialData.totalRevenue - financialData.totalExpenses;
+    // Calcular utilidad neta (ingresos - gastos - costos)
+    financialData.netIncome = financialData.totalRevenue - financialData.totalExpenses - financialData.totalCosts;
 
     // Ordenar cuentas por código
     financialData.assets.sort((a, b) => a.code.localeCompare(b.code));
@@ -167,6 +174,7 @@ export async function fetchFinancialData(periodId: string): Promise<FinancialDat
     financialData.equity.sort((a, b) => a.code.localeCompare(b.code));
     financialData.revenue.sort((a, b) => a.code.localeCompare(b.code));
     financialData.expenses.sort((a, b) => a.code.localeCompare(b.code));
+    financialData.costs.sort((a, b) => a.code.localeCompare(b.code));
 
     return financialData;
   } catch (error) {
@@ -208,8 +216,10 @@ export async function generateIncomeStatement(periodId: string) {
     return {
       revenue: financialData.revenue,
       expenses: financialData.expenses,
+      costs: financialData.costs,
       totalRevenue: financialData.totalRevenue,
       totalExpenses: financialData.totalExpenses,
+      totalCosts: financialData.totalCosts,
       netIncome: financialData.netIncome
     };
   } catch (error) {
@@ -286,8 +296,10 @@ export function prepareIncomeStatementExport(
   periodName: string,
   revenue: FinancialAccount[],
   expenses: FinancialAccount[],
+  costs: FinancialAccount[],
   totalRevenue: number,
   totalExpenses: number,
+  totalCosts: number,
   netIncome: number
 ) {
   return [
@@ -303,6 +315,15 @@ export function prepareIncomeStatementExport(
       account.balance,
     ]),
     ['', 'Total Ingresos', totalRevenue],
+    [''],
+    ['COSTOS'],
+    ['Código', 'Cuenta', 'Monto'],
+    ...costs.map(account => [
+      account.code,
+      account.name,
+      account.balance,
+    ]),
+    ['', 'Total Costos', totalCosts],
     [''],
     ['GASTOS'],
     ['Código', 'Cuenta', 'Monto'],

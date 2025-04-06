@@ -46,8 +46,10 @@ export default function FinancialStatements() {
   const [incomeStatement, setIncomeStatement] = useState<{
     revenue: FinancialAccount[];
     expenses: FinancialAccount[];
+    costs: FinancialAccount[];
     totalRevenue: number;
     totalExpenses: number;
+    totalCosts: number;
     netIncome: number;
   } | null>(null);
 
@@ -182,8 +184,10 @@ export default function FinancialStatements() {
         activePeriod.name,
         incomeStatement.revenue,
         incomeStatement.expenses,
+        incomeStatement.costs,
         incomeStatement.totalRevenue,
         incomeStatement.totalExpenses,
+        incomeStatement.totalCosts,
         incomeStatement.netIncome
       );
 
@@ -408,6 +412,31 @@ export default function FinancialStatements() {
             </div>
           </div>
 
+          {/* Costos */}
+          <div className="bg-white shadow rounded-lg p-4">
+            <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Costos</h4>
+            <div className="space-y-2">
+              {incomeStatement.costs.length > 0 ? (
+                incomeStatement.costs.map(account => (
+                  <div key={account.id} className="flex justify-between">
+                    <span className="text-sm text-gray-700">
+                      {account.code} - {account.name}
+                    </span>
+                    <span className="text-sm font-medium">{formatCurrency(account.balance)}</span>
+                  </div>
+                ))
+              ) : (
+                <div className="text-sm text-gray-500">No hay costos registrados en este período</div>
+              )}
+              <div className="border-t pt-2 mt-2 flex justify-between font-medium">
+                <span>Total Costos</span>
+                <span>{formatCurrency(incomeStatement.totalCosts)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {/* Gastos */}
           <div className="bg-white shadow rounded-lg p-4">
             <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Gastos</h4>
@@ -430,15 +459,30 @@ export default function FinancialStatements() {
               </div>
             </div>
           </div>
-        </div>
 
-        {/* Utilidad Neta */}
-        <div className="bg-white shadow rounded-lg p-4 mt-4">
-          <div className="flex justify-between font-medium text-lg">
-            <span>Utilidad Neta</span>
-            <span className={incomeStatement.netIncome >= 0 ? 'text-green-600' : 'text-red-600'}>
-              {formatCurrency(incomeStatement.netIncome)}
-            </span>
+          {/* Utilidad Neta */}
+          <div className="bg-white shadow rounded-lg p-4">
+            <h4 className="text-md font-medium text-gray-900 mb-3 border-b pb-2">Resumen</h4>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-700">Total Ingresos</span>
+                <span className="text-sm font-medium">{formatCurrency(incomeStatement.totalRevenue)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-700">Total Costos</span>
+                <span className="text-sm font-medium">{formatCurrency(incomeStatement.totalCosts)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-sm text-gray-700">Total Gastos</span>
+                <span className="text-sm font-medium">{formatCurrency(incomeStatement.totalExpenses)}</span>
+              </div>
+              <div className="border-t pt-2 mt-2 flex justify-between font-medium">
+                <span>Utilidad Neta</span>
+                <span className={incomeStatement.netIncome >= 0 ? 'text-green-600' : 'text-red-600'}>
+                  {formatCurrency(incomeStatement.netIncome)}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
       </div>

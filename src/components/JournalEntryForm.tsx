@@ -226,6 +226,9 @@ export default function JournalEntryForm({
   // Inicializar el formulario (lógica combinada para creación y edición)
   useEffect(() => {
     if (isEditMode && entry && entryItems) {
+      console.log('Cargando datos para edición:', entry);
+      console.log('Líneas para edición:', entryItems);
+      
       // Cargar datos de un asiento existente (regular o ajuste)
       setFormData({
         date: entry.date || format(new Date(), 'yyyy-MM-dd'),
@@ -240,21 +243,48 @@ export default function JournalEntryForm({
         adjusted_entry_id: entry.adjusted_entry_id || null,
       });
       
-      // Formatear líneas existentes
-      const formattedItems = entryItems.map((item): JournalEntryItem => ({
-          id: item.id,
-          journal_entry_id: item.journal_entry_id,
-          account_id: item.account_id,
-          description: item.description,
-          is_debit: typeof item.is_debit === 'boolean' ? item.is_debit : (parseFloat(item.debit || '0') > 0),
-          amount: typeof item.amount === 'number' ? item.amount : (parseFloat(item.debit || '0') > 0 ? parseFloat(item.debit || '0') : parseFloat(item.credit || '0')),
-          debit: parseFloat(item.debit || '0'),
-          credit: parseFloat(item.credit || '0'),
-          temp_id: item.id || uuidv4()
-      }));
-      setItems(formattedItems);
+      // Formatear líneas existentes con mejor manejo de débito/crédito
+      const formattedItems = entryItems.map((item): JournalEntryItem => {
+          // Determinar si es línea de débito o crédito verificando el valor
+          const debitValue = parseFloat(item.debit || '0');
+          const creditValue = parseFloat(item.credit || '0');
+          const isDebit = debitValue > 0;
+          const amount = isDebit ? debitValue : creditValue;
+          
+          console.log('Formateando línea:', item);
+          console.log(`Valor débito: ${debitValue}, Valor crédito: ${creditValue}, Es débito: ${isDebit}`);
+          
+          return {
+              id: item.id,
+              journal_entry_id: item.journal_entry_id,
+              account_id: item.account_id,
+              description: item.description || '',
+              is_debit: isDebit,
+              amount: amount,
+              debit: debitValue,
+              credit: creditValue,
+              temp_id: item.id || uuidv4(),
+              // Incluir datos de la cuenta si están disponibles
+              account: item.account
+          };
+      });
+      
+      console.log('Líneas formateadas para edición:', formattedItems);
+      
+      // Verificar si hay líneas
+      if (formattedItems.length === 0) {
+        console.warn('No se encontraron líneas para este asiento');
+        toast.warning('Este asiento no tiene líneas de detalle');
+        
+        // Crear líneas iniciales vacías si no hay
+        const debitLine = { temp_id: uuidv4(), account_id: '', description: '', is_debit: true, amount: undefined };
+        const creditLine = { temp_id: uuidv4(), account_id: '', description: '', is_debit: false, amount: undefined };
+        setItems([debitLine, creditLine]);
+      } else {
+        setItems(formattedItems);
+      }
+      
       setDataLoaded(true);
-
     } else if (mode === 'create' || mode === 'create-adjustment') {
       // Inicializar para nuevo asiento (regular o ajuste)
       setFormData(prevData => ({

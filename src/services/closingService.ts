@@ -186,11 +186,46 @@ export async function generateClosingEntry(periodId: string, userId: string) {
       
     if (resultAccountError) throw resultAccountError;
     
-    if (!resultAccountsList || resultAccountsList.length === 0) {
-      throw new Error('No se encontró la cuenta de Resultados del Ejercicio');
-    }
+    let resultAccount;
     
-    const resultAccount = resultAccountsList[0];
+    if (!resultAccountsList || resultAccountsList.length === 0) {
+      // Crear la cuenta de Resultados del Ejercicio si no existe
+      const { data: parentAccount, error: parentError } = await supabase
+        .from('accounts')
+        .select('*')
+        .eq('type', 'patrimonio')
+        .eq('is_parent', true)
+        .limit(1);
+        
+      if (parentError) throw parentError;
+      
+      if (!parentAccount || parentAccount.length === 0) {
+        throw new Error('No se encontró una cuenta de patrimonio padre para crear la cuenta de Resultados del Ejercicio');
+      }
+      
+      const { data: newAccount, error: createError } = await supabase
+        .from('accounts')
+        .insert({
+          parent_id: parentAccount[0].id,
+          code: '3105',
+          name: 'RESULTADOS DEL EJERCICIO',
+          description: 'Cuenta que registra los resultados del ejercicio contable',
+          is_active: true,
+          created_by: userId,
+          nature: 'acreedora',
+          type: 'patrimonio',
+          is_parent: false
+        })
+        .select()
+        .single();
+        
+      if (createError) throw createError;
+      
+      resultAccount = newAccount;
+      console.log('Cuenta de Resultados del Ejercicio creada automáticamente');
+    } else {
+      resultAccount = resultAccountsList[0];
+    }
     
     // Balancear el asiento con cuenta de resultados
     const netResult = totalIncome.minus(totalExpense);

@@ -201,7 +201,7 @@ export default function Dashboard() {
               </Link>
               
               <Link 
-                to="/reports"
+                to="/financial-statements"
                 className="p-4 border border-gray-200 rounded-lg hover:bg-gray-50 flex items-center"
               >
                 <Wallet className="h-5 w-5 text-amber-500 mr-3" />

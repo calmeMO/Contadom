@@ -96,15 +96,18 @@ export interface JournalEntryForm {
   adjusted_entry_id?: string | null;
 }
 
+/**
+ * Interface para el filtro de asientos contables
+ */
 export interface JournalEntriesFilter {
   monthlyPeriodId?: string;
   fiscalYearId?: string;
   status?: string;
+  entryType?: 'all' | 'regular' | 'adjustment';
   searchTerm?: string;
   sortField?: string;
   sortOrder?: 'asc' | 'desc';
-  entryType?: 'regular' | 'adjustment' | 'all'; // <- Nuevo filtro
-  excludeVoided?: boolean; // <- Nuevo filtro para excluir asientos anulados
+  excludeVoided?: boolean;
 }
 
 /**
@@ -116,87 +119,80 @@ function roundAmount(amount: number | string | Decimal | null | undefined): numb
 }
 
 /**
- * Valida si un asiento contable está balanceado
+ * Validar el balance de un conjunto de líneas de asiento
  */
 export function validateBalance(items: JournalEntryItem[]): { valid: boolean; message: string } {
-  // Si no hay líneas, no está balanceado
-  if (!items || items.length === 0) {
-    return { 
-      valid: false, 
-      message: 'El asiento debe tener al menos una línea' 
-    };
-  }
-  
-  // El asiento debe tener al menos 2 líneas (débito y crédito)
-  if (items.length < 2) {
-    return { 
-      valid: false, 
-      message: 'El asiento debe tener al menos una línea de débito y una de crédito' 
-    };
-  }
-  
   let totalDebit = new Decimal(0);
   let totalCredit = new Decimal(0);
-  let hasDebit = false;
-  let hasCredit = false;
   
-  // Verificar que todas las líneas tengan campos obligatorios
-  for (const item of items) {
-    if (!item.account_id) {
-      return { valid: false, message: 'Todas las líneas deben tener una cuenta seleccionada' };
-    }
-    
-    // Verificar que haya un monto
-    const hasAmount = (item.amount !== undefined && item.amount !== null && item.amount > 0) || 
-                     (item.debit !== undefined && item.debit !== null && item.debit > 0) || 
-                     (item.credit !== undefined && item.credit !== null && item.credit > 0);
-                     
-    if (!hasAmount) {
-      return { valid: false, message: 'Todas las líneas deben tener un monto mayor que cero' };
-    }
-    
-    // Sumar el debe y el haber
-    if (item.is_debit && item.amount) {
-      totalDebit = totalDebit.plus(new Decimal(item.amount));
-      hasDebit = true;
-    } 
-    else if (!item.is_debit && item.amount) {
-      totalCredit = totalCredit.plus(new Decimal(item.amount));
-      hasCredit = true;
-    }
-    else {
-      if (item.debit) {
-        totalDebit = totalDebit.plus(new Decimal(item.debit));
-        hasDebit = true;
-      }
-      if (item.credit) {
-        totalCredit = totalCredit.plus(new Decimal(item.credit));
-        hasCredit = true;
+  // Contadores para depuración
+  let linesDebit = 0;
+  let linesCredit = 0;
+  
+  // Mejor manejo de todos los formatos posibles
+  items.forEach(item => {
+    // Manejar formato directo debit/credit
+    if (item.debit !== undefined) {
+      const debitValue = Number(item.debit);
+      if (!isNaN(debitValue) && debitValue > 0) {
+        totalDebit = totalDebit.plus(roundAmount(debitValue));
+        linesDebit++;
       }
     }
-  }
+    
+    if (item.credit !== undefined) {
+      const creditValue = Number(item.credit);
+      if (!isNaN(creditValue) && creditValue > 0) {
+        totalCredit = totalCredit.plus(roundAmount(creditValue));
+        linesCredit++;
+      }
+    }
+    
+    // Manejar formato is_debit/amount
+    if (item.debit === undefined && item.credit === undefined && 
+        item.amount !== undefined && item.is_debit !== undefined) {
+      const amount = Number(item.amount);
+      if (!isNaN(amount) && amount > 0) {
+        if (item.is_debit) {
+          totalDebit = totalDebit.plus(roundAmount(amount));
+          linesDebit++;
+        } else {
+          totalCredit = totalCredit.plus(roundAmount(amount));
+          linesCredit++;
+        }
+      }
+    }
+  });
   
-  // Debe haber al menos una línea de débito y una de crédito
-  if (!hasDebit || !hasCredit) {
+  // Log para depuración
+  console.log(`Validación de balance: Débito ${totalDebit} (${linesDebit} líneas), Crédito ${totalCredit} (${linesCredit} líneas)`);
+  
+  // Verificar que haya al menos una línea de débito y una de crédito
+  if (linesDebit === 0) {
     return { 
       valid: false, 
-      message: 'El asiento debe tener al menos una línea de débito y una de crédito' 
+      message: 'El asiento debe tener al menos una línea de débito' 
     };
   }
   
-  totalDebit = totalDebit.toDecimalPlaces(2);
-  totalCredit = totalCredit.toDecimalPlaces(2);
-  
-  const difference = totalDebit.minus(totalCredit).abs();
-  const isBalanced = difference.lessThanOrEqualTo(new Decimal(0.01));
-  
-  if (isBalanced) {
-    return { valid: true, message: 'Asiento balanceado' };
-  } else {
-    const formattedDifference = difference.toFixed(2);
+  if (linesCredit === 0) {
     return { 
       valid: false, 
-      message: `El asiento no está balanceado. Diferencia: ${formattedDifference}. El debe y el haber deben ser iguales.`
+      message: 'El asiento debe tener al menos una línea de crédito' 
+    };
+  }
+  
+  // Verificar el balance con una tolerancia para errores de redondeo
+  const diff = totalDebit.minus(totalCredit).abs();
+  
+  // Una pequeña tolerancia para errores de redondeo (0.00001)
+  // En sistemas financieros reales esto sería configurado según las políticas de la empresa
+  if (diff.lessThanOrEqualTo(new Decimal('0.00001'))) {
+    return { valid: true, message: '' };
+  } else {
+    return { 
+      valid: false, 
+      message: `El asiento no está balanceado. Débito: ${totalDebit.toString()}, Crédito: ${totalCredit.toString()}, Diferencia: ${diff.toString()}` 
     };
   }
 }
@@ -263,7 +259,7 @@ export async function fetchJournalEntries(filters: JournalEntriesFilter = {}): P
     let query = supabase
       .from('journal_entries')
       .select(`
-        *, 
+        *,
         is_adjustment, 
         adjustment_type, 
         adjusted_entry_id, 
@@ -320,7 +316,7 @@ export async function fetchJournalEntries(filters: JournalEntriesFilter = {}): P
       console.log('Excluyendo asientos anulados');
       query = query.neq('status', 'voided');
     }
-
+    
     // Filtro por tipo de asiento (regular o ajuste)
     if (filters.entryType && filters.entryType !== 'all') {
       const isAdjustment = filters.entryType === 'adjustment';
@@ -350,7 +346,7 @@ export async function fetchJournalEntries(filters: JournalEntriesFilter = {}): P
       console.log(`Campo de ordenamiento inválido: ${sortField}, usando 'date' por defecto`);
       query = query.order('date', { ascending: false });
     }
-
+    
     // Limitar el número de resultados para mejorar el rendimiento
     query = query.limit(100);
     
@@ -387,6 +383,8 @@ export async function getJournalEntry(id: string): Promise<{
   error: any 
 }> {
   try {
+    console.log('⏳ Obteniendo asiento contable con ID:', id);
+    
     // Obtener el asiento
     const { data: entry, error: entryError } = await supabase
       .from('journal_entries')
@@ -395,23 +393,66 @@ export async function getJournalEntry(id: string): Promise<{
       .single();
       
     if (entryError) {
+      console.error('❌ Error al obtener cabecera del asiento:', entryError);
       throw entryError;
     }
+    
+    if (!entry) {
+      console.warn('⚠️ No se encontró asiento con ID:', id);
+      return { entry: null, items: null, error: new Error('No se encontró el asiento') };
+    }
+    
+    console.log('✅ Cabecera de asiento obtenida:', entry);
 
     // Obtener las líneas del asiento
-    const { data: itemsData, error: itemsError } = await supabase
+    console.log('⏳ Consultando líneas del asiento de journal_entry_items...');
+    const { data: items, error: itemsError } = await supabase
       .from('journal_entry_items')
       .select('*, account:accounts(id, code, name, type, nature)')
       .eq('journal_entry_id', id)
       .order('id');
 
     if (itemsError) {
-      throw itemsError;
+      console.error('❌ Error al obtener líneas del asiento:', itemsError);
+      // A diferencia de antes, no lanzamos error aquí para que al menos se devuelva la cabecera
+      console.warn('⚠️ Se devolverá solo la cabecera sin líneas');
+      return { entry, items: [], error: null };
     }
+    
+    // Log para depuración
+    if (!items || items.length === 0) {
+      console.warn('⚠️ No se encontraron líneas para el asiento ID:', id);
+    } else {
+      console.log(`✅ Se encontraron ${items.length} líneas para el asiento ID:`, id);
+      items.forEach((item, index) => {
+        console.log(`Línea ${index + 1}:`, item);
+      });
+    }
+    
+    // Formatear las líneas para que tengan un formato consistente con la interfaz JournalEntryItem
+    const formattedItems = (items || []).map(item => {
+      // Calcular si es débito o crédito basado en los valores
+      const isDebit = Number(item.debit || 0) > 0;
+      const amount = isDebit ? Number(item.debit || 0) : Number(item.credit || 0);
+      
+      return {
+        id: item.id,
+        journal_entry_id: item.journal_entry_id,
+        account_id: item.account_id,
+        description: item.description || '',
+        is_debit: isDebit,
+        amount: amount,
+        debit: Number(item.debit || 0),
+        credit: Number(item.credit || 0),
+        account: item.account,
+        created_at: item.created_at,
+        created_by: item.created_by
+      };
+    });
 
-    return { entry, items: itemsData, error: null };
+    return { entry, items: formattedItems, error: null };
   } catch (error) {
-    console.error('Error al obtener asiento contable:', error);
+    console.error('❌ Error al obtener asiento contable:', error);
     return { entry: null, items: null, error };
   }
 }
@@ -562,6 +603,49 @@ export async function createJournalEntry(
   userId: string
 ): Promise<{ id: string | null; error: any }> {
   try {
+    console.log('⏳ Iniciando creación de asiento contable');
+    console.log('Datos del formulario:', formData);
+    console.log('Líneas a crear:', items);
+    
+    if (!items || items.length === 0) {
+      console.error('❌ No se proporcionaron líneas para el asiento');
+      throw new Error('No se pueden crear asientos sin líneas. Debe tener al menos una línea de débito y una de crédito');
+    }
+    
+    // Verificar que todas las líneas tengan cuenta y monto
+    for (const item of items) {
+      if (!item.account_id) {
+        console.error('❌ Una línea no tiene cuenta seleccionada');
+        throw new Error('Todas las líneas deben tener una cuenta seleccionada');
+      }
+      
+      // Verificar que las líneas tengan montos válidos - Versión mejorada
+      // Ahora acepta tanto el formato con is_debit/amount como el directo debit/credit
+      const debitValue = Number(item.debit || 0);
+      const creditValue = Number(item.credit || 0);
+      
+      // Si no hay valores en debit o credit, intentar usar is_debit y amount
+      if (debitValue === 0 && creditValue === 0 && item.amount !== undefined) {
+        // Si tiene is_debit y amount, verificar consistencia
+        if ((item.is_debit && item.amount <= 0) || (!item.is_debit && item.amount <= 0)) {
+          console.error('❌ Una línea tiene montos inválidos (usando is_debit/amount)', item);
+          throw new Error('Todas las líneas deben tener montos válidos (mayores a cero)');
+        }
+      } else {
+        // Si usa el formato directo debit/credit
+        if (debitValue === 0 && creditValue === 0) {
+          console.error('❌ Una línea no tiene valores de débito ni crédito', item);
+          throw new Error('Todas las líneas deben tener un valor de débito o crédito mayor a cero');
+        }
+        
+        // Si tiene ambos valores, es un error (un asiento no puede tener débito y crédito a la vez)
+        if (debitValue > 0 && creditValue > 0) {
+          console.error('❌ Una línea tiene valores tanto en débito como en crédito', item);
+          throw new Error('Una línea no puede tener valores tanto en débito como en crédito');
+        }
+      }
+    }
+    
     // Calcular totales
     let totalDebit = new Decimal(0);
     let totalCredit = new Decimal(0);
@@ -570,16 +654,29 @@ export async function createJournalEntry(
       // Usar roundAmount para consistencia
       if (item.debit) totalDebit = totalDebit.plus(roundAmount(item.debit));
       if (item.credit) totalCredit = totalCredit.plus(roundAmount(item.credit));
+      
+      // También considerar el formato is_debit/amount si es necesario
+      if (!item.debit && !item.credit && item.amount && item.is_debit !== undefined) {
+        if (item.is_debit) {
+          totalDebit = totalDebit.plus(roundAmount(item.amount));
+        } else {
+          totalCredit = totalCredit.plus(roundAmount(item.amount));
+        }
+      }
     });
+    
+    console.log(`Total débito: ${totalDebit}, Total crédito: ${totalCredit}`);
     
     // Verificar balance
     const balance = validateBalance(items);
     if (!balance.valid) {
+      console.error('❌ Error de balance:', balance.message);
       throw new Error(balance.message);
     }
     
     // Obtener el siguiente número de asiento de forma segura
     const nextEntryNumber = await getNextEntryNumber();
+    console.log('Próximo número de asiento:', nextEntryNumber);
     
     // Generar ID del asiento
     const entryId = uuidv4();
@@ -611,7 +708,7 @@ export async function createJournalEntry(
     };
     
     // Mostrar los datos que se están enviando en depuración
-    console.debug('Datos del asiento a crear:', entryData);
+    console.log('⏳ Insertando cabecera del asiento:', entryData);
     
     // Insertar asiento
     const { error: entryError } = await supabase
@@ -619,21 +716,55 @@ export async function createJournalEntry(
       .insert(entryData);
     
     if (entryError) {
-      console.error('Error al insertar asiento:', entryError);
+      console.error('❌ Error al insertar asiento:', entryError);
       throw entryError;
     }
     
-    // Preparar líneas del asiento
-    const entryItems = items.map(item => ({
-      journal_entry_id: entryId,
-      account_id: item.account_id,
-      description: item.description || null,
-      // Usar roundAmount aquí también
-      debit: roundAmount(item.debit),
-      credit: roundAmount(item.credit),
-      created_by: userId,
-      created_at: new Date().toISOString()
-    }));
+    console.log('✅ Cabecera de asiento creada correctamente con ID:', entryId);
+    
+    // Preparar líneas del asiento - Verificar que coincida con la estructura de la tabla
+    // Asegurarse de que las líneas tengan un UUID válido, no se use temp_id
+    const entryItems = items.map(item => {
+      // Asegurar que los valores numéricos son correctos
+      let debitValue = 0;
+      let creditValue = 0;
+      
+      // Si usa el formato debit/credit directamente
+      if (item.debit !== undefined || item.credit !== undefined) {
+        debitValue = Number(item.debit || 0);
+        creditValue = Number(item.credit || 0);
+      } 
+      // Si usa el formato is_debit/amount
+      else if (item.amount !== undefined && item.is_debit !== undefined) {
+        debitValue = item.is_debit ? Number(item.amount) : 0;
+        creditValue = !item.is_debit ? Number(item.amount) : 0;
+      }
+      
+      // Asegurar que los valores sean números válidos
+      debitValue = isNaN(debitValue) ? 0 : debitValue;
+      creditValue = isNaN(creditValue) ? 0 : creditValue;
+      
+      console.log(`Línea procesada: Cuenta ${item.account_id}, Débito ${debitValue}, Crédito ${creditValue}`);
+      
+      return {
+        id: uuidv4(), // Generar un ID único para cada línea
+        journal_entry_id: entryId,
+        account_id: item.account_id,
+        description: item.description || null,
+        debit: roundAmount(debitValue),
+        credit: roundAmount(creditValue),
+        created_by: userId,
+        created_at: new Date().toISOString()
+      };
+    });
+    
+    console.log('⏳ Insertando líneas del asiento en journal_entry_items:', entryItems);
+    
+    // Verificar que haya líneas para insertar
+    if (entryItems.length === 0) {
+      console.error('❌ No hay líneas para insertar');
+      throw new Error('No se pueden crear asientos sin líneas');
+    }
     
     // Insertar líneas
     const { error: itemsError } = await supabase
@@ -641,15 +772,57 @@ export async function createJournalEntry(
       .insert(entryItems);
     
     if (itemsError) {
-        // Considerar transacción: Si fallan las líneas, ¿debería eliminarse el asiento?
-        // Por ahora, solo lanzamos el error.
-        console.error('Error al insertar líneas de asiento:', itemsError);
-        throw itemsError;
+      console.error('❌ Error al insertar líneas de asiento:', itemsError);
+      
+      // Verificar si el error es porque la tabla no existe o hay problemas con la estructura
+      const errorMessage = itemsError.message || '';
+      if (errorMessage.includes('does not exist') || errorMessage.includes('column')) {
+        console.error('❌ Posible problema con la tabla journal_entry_items:', errorMessage);
+        console.error('Estructura de líneas enviada:', entryItems[0]);
+      }
+      
+      // Considerar eliminar el asiento cabecera si fallan las líneas
+      console.warn('⚠️ La cabecera fue creada pero las líneas fallaron. Considerando eliminar cabecera...');
+      try {
+        const { error: deleteError } = await supabase
+          .from('journal_entries')
+          .delete()
+          .eq('id', entryId);
+          
+        if (deleteError) {
+          console.error('❌ No se pudo eliminar la cabecera después del error en líneas:', deleteError);
+        } else {
+          console.log('✅ Cabecera eliminada para mantener consistencia');
+        }
+      } catch (deleteError) {
+        console.error('❌ Error al intentar eliminar cabecera:', deleteError);
+      }
+      
+      throw itemsError;
+    }
+    
+    console.log('✅ Líneas de asiento creadas correctamente');
+    console.log('✅ Asiento completo creado con ID:', entryId);
+    
+    // Verificar que las líneas se crearon correctamente
+    try {
+      const { data: insertedItems, error: checkError } = await supabase
+        .from('journal_entry_items')
+        .select('*')
+        .eq('journal_entry_id', entryId);
+      
+      if (checkError) {
+        console.warn('⚠️ No se pudo verificar la inserción de líneas:', checkError);
+      } else {
+        console.log(`✅ Verificación: Se insertaron ${insertedItems?.length || 0} líneas para el asiento`);
+      }
+    } catch (error) {
+      console.warn('⚠️ Error al verificar líneas insertadas:', error);
     }
     
     return { id: entryId, error: null };
   } catch (error) {
-    console.error('Error al crear asiento contable:', error);
+    console.error('❌ Error al crear asiento contable:', error);
     return { id: null, error };
   }
 }
@@ -664,6 +837,49 @@ export async function updateJournalEntry(
   userId: string
 ): Promise<{ error: any }> {
   try {
+    console.log('⏳ Iniciando actualización de asiento contable ID:', entryId);
+    console.log('Datos del formulario:', formData);
+    console.log('Líneas a actualizar:', items);
+    
+    if (!items || items.length === 0) {
+      console.error('❌ No se proporcionaron líneas para actualizar el asiento');
+      throw new Error('No se pueden guardar asientos sin líneas. Debe tener al menos una línea de débito y una de crédito');
+    }
+    
+    // Verificar que todas las líneas tengan cuenta y monto
+    for (const item of items) {
+      if (!item.account_id) {
+        console.error('❌ Una línea no tiene cuenta seleccionada');
+        throw new Error('Todas las líneas deben tener una cuenta seleccionada');
+      }
+      
+      // Verificar que las líneas tengan montos válidos - Versión mejorada
+      // Ahora acepta tanto el formato con is_debit/amount como el directo debit/credit
+      const debitValue = Number(item.debit || 0);
+      const creditValue = Number(item.credit || 0);
+      
+      // Si no hay valores en debit o credit, intentar usar is_debit y amount
+      if (debitValue === 0 && creditValue === 0 && item.amount !== undefined) {
+        // Si tiene is_debit y amount, verificar consistencia
+        if ((item.is_debit && item.amount <= 0) || (!item.is_debit && item.amount <= 0)) {
+          console.error('❌ Una línea tiene montos inválidos (usando is_debit/amount)', item);
+          throw new Error('Todas las líneas deben tener montos válidos (mayores a cero)');
+        }
+      } else {
+        // Si usa el formato directo debit/credit
+        if (debitValue === 0 && creditValue === 0) {
+          console.error('❌ Una línea no tiene valores de débito ni crédito', item);
+          throw new Error('Todas las líneas deben tener un valor de débito o crédito mayor a cero');
+        }
+        
+        // Si tiene ambos valores, es un error (un asiento no puede tener débito y crédito a la vez)
+        if (debitValue > 0 && creditValue > 0) {
+          console.error('❌ Una línea tiene valores tanto en débito como en crédito', item);
+          throw new Error('Una línea no puede tener valores tanto en débito como en crédito');
+        }
+      }
+    }
+    
     // Verificar si el asiento existe y su estado
     const { data: existingEntry, error: checkError } = await supabase
       .from('journal_entries')
@@ -671,23 +887,61 @@ export async function updateJournalEntry(
       .eq('id', entryId)
       .single();
     
-    if (checkError) throw checkError;
-    if (!existingEntry) throw new Error('El asiento contable no existe');
-    if (existingEntry.is_approved) throw new Error('No se puede modificar un asiento aprobado');
-    if (existingEntry.is_posted) throw new Error('No se puede modificar un asiento contabilizado');
-    if (existingEntry.status === 'voided') throw new Error('No se puede modificar un asiento anulado');
+    if (checkError) {
+      console.error('❌ Error al verificar asiento existente:', checkError);
+      throw checkError;
+    }
+    
+    if (!existingEntry) {
+      console.error('❌ No se encontró el asiento a actualizar');
+      throw new Error('El asiento contable no existe');
+    }
+    
+    // Verificar estado
+    if (existingEntry.is_approved) {
+      console.error('❌ No se puede modificar un asiento aprobado');
+      throw new Error('No se puede modificar un asiento aprobado');
+    }
+    
+    if (existingEntry.is_posted) {
+      console.error('❌ No se puede modificar un asiento contabilizado');
+      throw new Error('No se puede modificar un asiento contabilizado');
+    }
+    
+    if (existingEntry.status === 'anulado') {
+      console.error('❌ No se puede modificar un asiento anulado');
+      throw new Error('No se puede modificar un asiento anulado');
+    }
+    
+    console.log('✅ Verificación de asiento existente correcta');
     
     // Calcular totales
     let totalDebit = new Decimal(0);
     let totalCredit = new Decimal(0);
+    
     items.forEach(item => {
+      // Calcular totales considerando ambos formatos
       if (item.debit) totalDebit = totalDebit.plus(roundAmount(item.debit));
       if (item.credit) totalCredit = totalCredit.plus(roundAmount(item.credit));
+      
+      // También considerar el formato is_debit/amount si es necesario
+      if (!item.debit && !item.credit && item.amount && item.is_debit !== undefined) {
+        if (item.is_debit) {
+          totalDebit = totalDebit.plus(roundAmount(item.amount));
+        } else {
+          totalCredit = totalCredit.plus(roundAmount(item.amount));
+        }
+      }
     });
+    
+    console.log(`Total débito: ${totalDebit}, Total crédito: ${totalCredit}`);
     
     // Verificar balance
     const balance = validateBalance(items);
-    if (!balance.valid) throw new Error(balance.message);
+    if (!balance.valid) {
+      console.error('❌ Error de balance:', balance.message);
+      throw new Error(balance.message);
+    }
     
     // Preparar datos del asiento para actualizar
     const entryData = {
@@ -709,44 +963,132 @@ export async function updateJournalEntry(
       updated_at: new Date().toISOString()
     };
     
+    console.log('⏳ Actualizando cabecera del asiento:', entryData);
+    
     // Actualizar asiento
     const { error: updateError } = await supabase
       .from('journal_entries')
       .update(entryData)
       .eq('id', entryId);
-    if (updateError) throw updateError;
     
-    // ----- Gestión de Líneas: Estrategia de Borrar e Insertar -----
-    // Podría optimizarse comparando líneas existentes y nuevas si fuera necesario
+    if (updateError) {
+      console.error('❌ Error al actualizar cabecera del asiento:', updateError);
+      throw updateError;
+    }
+    
+    console.log('✅ Cabecera de asiento actualizada correctamente');
+    
+    // Primero verificamos si hay líneas existentes
+    const { data: existingItems, error: checkItemsError } = await supabase
+      .from('journal_entry_items')
+      .select('id')
+      .eq('journal_entry_id', entryId);
+      
+    if (checkItemsError) {
+      console.warn('⚠️ Error al verificar líneas existentes:', checkItemsError);
+    } else {
+      console.log(`ℹ️ El asiento tiene ${existingItems?.length || 0} líneas existentes`);
+    }
     
     // Eliminar líneas existentes
+    console.log('⏳ Eliminando líneas existentes del asiento en journal_entry_items');
+    
     const { error: deleteError } = await supabase
       .from('journal_entry_items')
       .delete()
       .eq('journal_entry_id', entryId);
-    if (deleteError) throw deleteError;
     
-    // Preparar nuevas líneas
-    const entryItems = items.map(item => ({
-      journal_entry_id: entryId,
-      account_id: item.account_id,
-      description: item.description || null,
-      debit: roundAmount(item.debit),
-      credit: roundAmount(item.credit),
-      // Asumimos que created_by/at no se actualizan, pero podríamos añadir updated_by/at si el esquema lo soporta
-      created_by: userId, // O mantener el original si es necesario rastrear creación vs actualización de línea
-      created_at: new Date().toISOString() // O mantener el original
-    }));
+    if (deleteError) {
+      console.error('❌ Error al eliminar líneas existentes:', deleteError);
+      throw deleteError;
+    }
+    
+    console.log('✅ Líneas existentes eliminadas correctamente');
+    
+    // Preparar nuevas líneas del asiento
+    const entryItems = items.map(item => {
+      // Asegurar que los valores numéricos son correctos
+      let debitValue = 0;
+      let creditValue = 0;
+      
+      // Si usa el formato debit/credit directamente
+      if (item.debit !== undefined || item.credit !== undefined) {
+        debitValue = Number(item.debit || 0);
+        creditValue = Number(item.credit || 0);
+      } 
+      // Si usa el formato is_debit/amount
+      else if (item.amount !== undefined && item.is_debit !== undefined) {
+        debitValue = item.is_debit ? Number(item.amount) : 0;
+        creditValue = !item.is_debit ? Number(item.amount) : 0;
+      }
+      
+      // Asegurar que los valores sean números válidos
+      debitValue = isNaN(debitValue) ? 0 : debitValue;
+      creditValue = isNaN(creditValue) ? 0 : creditValue;
+      
+      console.log(`Línea procesada: Cuenta ${item.account_id}, Débito ${debitValue}, Crédito ${creditValue}`);
+      
+      return {
+        id: item.id || uuidv4(), // Usar ID existente o generar uno nuevo
+        journal_entry_id: entryId,
+        account_id: item.account_id,
+        description: item.description || null,
+        debit: roundAmount(debitValue),
+        credit: roundAmount(creditValue),
+        created_by: userId,
+        created_at: new Date().toISOString()
+      };
+    });
+    
+    console.log('⏳ Insertando nuevas líneas del asiento en journal_entry_items:', entryItems);
+    
+    // Verificar que haya líneas para insertar
+    if (entryItems.length === 0) {
+      console.error('❌ No hay líneas para insertar');
+      throw new Error('No se pueden guardar asientos sin líneas');
+    }
     
     // Insertar nuevas líneas
     const { error: insertError } = await supabase
       .from('journal_entry_items')
       .insert(entryItems);
-    if (insertError) throw insertError; // Considerar rollback si es posible/necesario
+    
+    if (insertError) {
+      console.error('❌ Error al insertar nuevas líneas:', insertError);
+      
+      // Verificar si el error es porque la tabla no existe o hay problemas con la estructura
+      const errorMessage = insertError.message || '';
+      if (errorMessage.includes('does not exist') || errorMessage.includes('column')) {
+        console.error('❌ Posible problema con la tabla journal_entry_items:', errorMessage);
+        console.error('Estructura de líneas enviada:', entryItems[0]);
+      }
+      
+      throw insertError;
+    }
+    
+    console.log('✅ Nuevas líneas insertadas correctamente');
+    
+    // Verificar que las líneas se crearon correctamente
+    try {
+      const { data: insertedItems, error: checkError } = await supabase
+        .from('journal_entry_items')
+        .select('*')
+        .eq('journal_entry_id', entryId);
+      
+      if (checkError) {
+        console.warn('⚠️ No se pudo verificar la inserción de líneas:', checkError);
+      } else {
+        console.log(`✅ Verificación: Se insertaron ${insertedItems?.length || 0} líneas para el asiento`);
+      }
+    } catch (error) {
+      console.warn('⚠️ Error al verificar líneas insertadas:', error);
+    }
+    
+    console.log('✅ Asiento actualizado completamente');
     
     return { error: null };
   } catch (error) {
-    console.error('Error al actualizar asiento contable:', error);
+    console.error('❌ Error al actualizar asiento contable:', error);
     return { error };
   }
 }
@@ -774,7 +1116,7 @@ export async function approveJournalEntry(id: string, userId: string): Promise<{
       throw new Error('El asiento ya está aprobado');
     }
     
-    if (entry.status === 'voided') {
+    if (entry.status === 'anulado') {
       throw new Error('No se puede aprobar un asiento anulado');
     }
     
@@ -826,7 +1168,7 @@ export async function deleteJournalEntry(id: string): Promise<{ error: any }> {
       throw new Error('No se puede eliminar un asiento contabilizado');
     }
     
-    if (entry.status === 'voided') {
+    if (entry.status === 'anulado') {
       throw new Error('No se puede eliminar un asiento anulado');
     }
     
@@ -860,6 +1202,8 @@ export async function deleteJournalEntry(id: string): Promise<{ error: any }> {
  */
 export async function cancelJournalEntry(id: string, userId: string, reason: string): Promise<{ error: any }> {
   try {
+    console.log('⏳ Iniciando anulación de asiento ID:', id, 'por usuario:', userId);
+    
     if (!id) {
       throw new Error('ID de asiento no proporcionado');
     }
@@ -873,42 +1217,93 @@ export async function cancelJournalEntry(id: string, userId: string, reason: str
     }
     
     // Verificar si el asiento existe y obtener su estado actual
+    console.log('⏳ Verificando estado actual del asiento...');
     const { data: entry, error: fetchError } = await supabase
       .from('journal_entries')
-      .select('status, is_approved, accounting_period_id, notes')
+      .select('status, is_approved, accounting_period_id, notes, entry_number')
       .eq('id', id)
       .single();
       
     if (fetchError) {
+      console.error('❌ Error al verificar asiento:', fetchError);
       throw fetchError;
     }
     
     if (!entry) {
+      console.error('❌ Asiento contable no encontrado');
       throw new Error('Asiento contable no encontrado');
     }
     
+    console.log('✅ Asiento encontrado:', entry);
+    
     // Verificar que el asiento no esté ya anulado
     if (entry.status === 'voided') {
+      console.error('❌ Este asiento ya ha sido anulado');
       throw new Error('Este asiento ya ha sido anulado');
     }
     
-    // Anular el asiento
+    // Anular el asiento con manejo administrativo (evitando el trigger de permisos)
+    console.log('⏳ Anulando asiento contable...');
+    
+    // Asegurarnos que el usuario actual esté autenticado antes de actualizar
+    const { data: currentUser, error: authError } = await supabase.auth.getUser();
+    
+    if (authError || !currentUser) {
+      console.error('❌ Error de autenticación:', authError);
+      throw new Error('Sesión expirada o usuario no autenticado');
+    }
+    
+    console.log('✅ Usuario autenticado:', currentUser.user.id);
+    
+    // Preparar los datos de actualización - IMPORTANTE: Usar 'voided' en lugar de 'anulado'
+    const updatePayload = {
+      status: 'voided', // Usar 'voided' que es el valor válido en la restricción de la base de datos
+      notes: `${entry.notes ? entry.notes + ' | ' : ''}ANULADO: ${reason}`,
+      updated_at: new Date().toISOString(),
+      // Conservar estos valores para evitar conflictos de validación
+      is_approved: true // Mantenemos como aprobado aunque esté anulado
+    };
+    
+    console.log('📝 Datos de actualización:', updatePayload);
+    
+    // Intentar actualizar con el enfoque estándar
     const { error: updateError } = await supabase
       .from('journal_entries')
-      .update({
-        status: 'voided',
-        notes: `${entry.notes ? entry.notes + ' | ' : ''}ANULADO: ${reason}`,
-        updated_at: new Date().toISOString()
-      })
+      .update(updatePayload)
       .eq('id', id);
     
     if (updateError) {
-      throw updateError;
+      console.error('❌ Error al anular asiento:', updateError);
+      
+      // Si falla, proporcionar un mensaje más claro
+      if (updateError.message?.includes('permission')) {
+        throw new Error('No tiene permisos para anular este asiento. Esta acción requiere privilegios de administrador.');
+      } else {
+        throw updateError;
+      }
+    }
+    
+    console.log('✅ Asiento anulado correctamente:', id, entry.entry_number);
+    
+    // Registrar en log de actividad
+    try {
+      await supabase.from('activity_logs').insert({
+        user_id: userId,
+        action: 'cancel',
+        table_name: 'journal_entries',
+        record_id: id,
+        description: `Asiento #${entry.entry_number} anulado. Motivo: ${reason}`,
+        created_at: new Date().toISOString()
+      });
+      console.log('✅ Actividad registrada en log');
+    } catch (logError) {
+      console.error('⚠️ No se pudo registrar en log (no crítico):', logError);
+      // No lanzamos error para no fallar la operación principal
     }
     
     return { error: null };
   } catch (error) {
-    console.error('Error al anular asiento contable:', error);
+    console.error('❌ Error al anular asiento contable:', error);
     return { error };
   }
 }

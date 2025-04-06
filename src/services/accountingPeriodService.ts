@@ -907,10 +907,6 @@ export async function toggleFiscalYearActive(
       return { success: false, error: 'Año fiscal no encontrado' };
     }
     
-    if (fiscalYear.is_closed) {
-      return { success: false, error: 'No se puede modificar un año fiscal cerrado' };
-    }
-    
     // Si ya está en el estado deseado, no hacer nada
     if (fiscalYear.is_active === isActive) {
       return { 

@@ -22,39 +22,56 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     loading: true,
   });
 
+  // Función para obtener perfil del usuario con su rol
+  const getUserProfile = async (userId: string): Promise<{ role: 'admin' | 'accountant' | 'user'; full_name?: string }> => {
+    try {
+      const { data, error } = await supabase
+        .from('user_profiles')
+        .select('role, full_name')
+        .eq('id', userId)
+        .single();
+        
+      if (error) throw error;
+      return { 
+        role: (data?.role as 'admin' | 'accountant' | 'user') || 'user', 
+        full_name: data?.full_name 
+      };
+    } catch (error) {
+      console.error('Error al obtener perfil de usuario:', error);
+      return { role: 'user' };
+    }
+  };
+
+  // Función para actualizar el estado de la autenticación con datos completos
+  const updateAuthState = async (session: any | null) => {
+    if (session?.user) {
+      // Obtener el rol del perfil del usuario
+      const profile = await getUserProfile(session.user.id);
+      
+      setAuthState({
+        user: {
+          id: session.user.id,
+          email: session.user.email!,
+          role: profile.role,
+          full_name: profile.full_name,
+          created_at: session.user.created_at,
+        },
+        loading: false,
+      });
+    } else {
+      setAuthState({ user: null, loading: false });
+    }
+  };
+
   useEffect(() => {
     // Check active sessions and subscribe to auth changes
     supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        setAuthState({
-          user: {
-            id: session.user.id,
-            email: session.user.email!,
-            role: 'user', // Default role, should be fetched from user_profiles table
-            created_at: session.user.created_at,
-          },
-          loading: false,
-        });
-      } else {
-        setAuthState({ user: null, loading: false });
-      }
+      updateAuthState(session);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        if (session?.user) {
-          setAuthState({
-            user: {
-              id: session.user.id,
-              email: session.user.email!,
-              role: 'user',
-              created_at: session.user.created_at,
-            },
-            loading: false,
-          });
-        } else {
-          setAuthState({ user: null, loading: false });
-        }
+        updateAuthState(session);
       }
     );
 
@@ -64,16 +81,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    if (error) throw error;
+    setAuthState((prev) => ({ ...prev, loading: true }));
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (error) throw error;
+
+      // El estado se actualizará automáticamente a través del listener onAuthStateChange
+    } catch (error: any) {
+      console.error('Error al iniciar sesión:', error.message);
+      setAuthState((prev) => ({ ...prev, loading: false }));
+      throw error;
+    }
   };
 
   const signOut = async () => {
-    const { error } = await supabase.auth.signOut();
-    if (error) throw error;
+    setAuthState((prev) => ({ ...prev, loading: true }));
+    try {
+      await supabase.auth.signOut();
+      // El estado se actualizará automáticamente a través del listener onAuthStateChange
+    } catch (error) {
+      console.error('Error al cerrar sesión:', error);
+      setAuthState((prev) => ({ ...prev, loading: false }));
+    }
   };
 
   return (

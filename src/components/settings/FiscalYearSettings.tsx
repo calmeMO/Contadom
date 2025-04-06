@@ -33,6 +33,26 @@ import Modal from '../ui/Modal';
 import Decimal from 'decimal.js';
 import { FiscalYearType } from '../../types/database';
 
+// Función para formatear fechas en formato español textual (1 de enero de 2023)
+const formatDateSpanish = (dateString: string): string => {
+  if (!dateString) return '';
+  
+  const date = new Date(dateString);
+  const day = date.getDate();
+  const year = date.getFullYear();
+  
+  // Array de nombres de meses en español
+  const monthNames = [
+    'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+    'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'
+  ];
+  
+  const month = monthNames[date.getMonth()];
+  
+  // Formato: "1 de enero de 2023"
+  return `${day} de ${month} de ${year}`;
+};
+
 // Agregar interfaz para extender MonthlyPeriod con fiscal_year
 interface EnhancedMonthlyPeriod extends MonthlyPeriod {
   fiscal_year?: {
@@ -84,9 +104,13 @@ export function FiscalYearSettings() {
   // Estadísticas de períodos
   const [periodStats, setPeriodStats] = useState<Record<string, { count: number, balance: Decimal }>>({});
   
+  const [companyFiscalYearType, setCompanyFiscalYearType] = useState<FiscalYearType | null>(null);
+  
   useEffect(() => {
-    getCurrentUser();
-    fetchData();
+    getCurrentUser().then(() => {
+      fetchData();
+      fetchCompanySettings();
+    });
   }, []);
 
   async function getCurrentUser() {
@@ -295,34 +319,26 @@ export function FiscalYearSettings() {
       toast.error('Debes iniciar sesión para realizar esta acción');
       return;
     }
-    
+
     try {
-      setProcessingYearId(fiscalYearId);
+      setLoading(true);
       
-      // Confirmar con el usuario
-      if (!window.confirm('¿Estás seguro de inicializar los períodos mensuales para este año fiscal? Esta acción creará todos los períodos mensuales correspondientes.')) {
-        setProcessingYearId(null);
-        return;
-      }
-      
+      // Llamar al servicio para inicializar períodos mensuales
       const { success, error } = await initializeMonthlyPeriodsForFiscalYear(fiscalYearId, user.id);
       
-      if (!success) throw new Error(error);
+      if (!success) {
+        throw new Error(error);
+      }
       
-      toast.success('Períodos mensuales inicializados correctamente');
-      
-      // Refrescar la data completa
+      // Refrescar datos para mostrar los nuevos períodos
       await fetchData();
       
-      // Expandir el año que acabamos de inicializar si no está expandido
-      if (!expandedYears.includes(fiscalYearId)) {
-        setExpandedYears(prev => [...prev, fiscalYearId]);
-      }
-    } catch (error: any) {
+      toast.success('Períodos mensuales inicializados correctamente');
+    } catch (error) {
       console.error('Error al inicializar períodos mensuales:', error);
-      toast.error(`Error: ${error.message || 'No se pudieron inicializar los períodos mensuales'}`);
+      toast.error('Error al inicializar los períodos mensuales');
     } finally {
-      setProcessingYearId(null);
+      setLoading(false);
     }
   };
 
@@ -506,121 +522,271 @@ export function FiscalYearSettings() {
   const handleSubmitCreateForm = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!user?.id) {
-      toast.error('Debes iniciar sesión para crear un año fiscal');
+    if (!formData.name || !formData.start_date || !formData.end_date) {
+      toast.error('Por favor complete todos los campos requeridos');
       return;
     }
     
     try {
       setLoading(true);
       
-      // Validar que no exista un año fiscal con el mismo nombre
-      const { data: existingByName, error: nameError } = await supabase
-        .from('accounting_periods')
-        .select('id, name')
-        .eq('name', formData.name)
-        .limit(1);
-        
-      if (nameError) throw nameError;
+      // Si existe un tipo de año fiscal configurado en la empresa, usar ese
+      const effectiveFiscalYearType = companyFiscalYearType || formData.fiscal_year_type;
       
-      if (existingByName && existingByName.length > 0) {
-        toast.error(`Ya existe un año fiscal con el nombre "${formData.name}"`);
-        setLoading(false);
-        return;
-      }
-      
-      // Validar que no exista un año fiscal con fechas superpuestas
-      const { data: existingByDates, error: datesError } = await supabase
+      // Verificar si ya existe un año fiscal con estas fechas o con fechas solapadas
+      const { data: existingYears, error: checkError } = await supabase
         .from('accounting_periods')
         .select('id, name, start_date, end_date')
-        .or(`start_date.lte.${formData.end_date},end_date.gte.${formData.start_date}`)
-        .is('is_month', false)
-        .not('fiscal_year_type', 'eq', formData.fiscal_year_type)
-        .limit(1);
-        
-      if (datesError) throw datesError;
+        .eq('is_month', false)
+        .or(`start_date.lte.${formData.end_date},end_date.gte.${formData.start_date}`);
       
-      if (existingByDates && existingByDates.length > 0) {
-        const existing = existingByDates[0];
-        toast.error(`Las fechas se superponen con el año fiscal existente "${existing.name}" (${new Date(existing.start_date).toLocaleDateString()} - ${new Date(existing.end_date).toLocaleDateString()})`);
-        setLoading(false);
-        return;
+      if (checkError) {
+        throw checkError;
       }
       
-      // Las fechas son generadas automáticamente según el tipo fiscal
-      // y no pueden ser editadas manualmente, por lo que no es necesario
-      // realizar validaciones adicionales
+      // Verificar si hay solapamiento de fechas
+      if (existingYears && existingYears.length > 0) {
+        const overlappingYear = existingYears.find(year => {
+          const yearStart = new Date(year.start_date);
+          const yearEnd = new Date(year.end_date);
+          const formStart = new Date(formData.start_date);
+          const formEnd = new Date(formData.end_date);
+          
+          return (
+            (formStart >= yearStart && formStart <= yearEnd) || // Inicio dentro del rango existente
+            (formEnd >= yearStart && formEnd <= yearEnd) ||     // Fin dentro del rango existente
+            (formStart <= yearStart && formEnd >= yearEnd)      // Rango existente dentro del nuevo rango
+          );
+        });
+        
+        if (overlappingYear) {
+          toast.warning(`El período solicitado se solapa con "${overlappingYear.name}" (${formatDateSpanish(overlappingYear.start_date)} - ${formatDateSpanish(overlappingYear.end_date)})`);
+          return;
+        }
+      }
       
-      // Crear año fiscal
-      const { data, error } = await createFiscalYear(formData, user.id);
+      // Verificar que sea el período siguiente y no haya huecos
+      if (fiscalYears.length > 0) {
+        const sortedYears = [...fiscalYears].sort((a, b) => 
+          new Date(b.end_date).getTime() - new Date(a.end_date).getTime()
+        );
+        
+        const lastFiscalYear = sortedYears[0];
+        const lastEndDate = new Date(lastFiscalYear.end_date);
+        const newStartDate = new Date(formData.start_date);
+        
+        // Calcular la diferencia en días
+        const diffTime = Math.abs(newStartDate.getTime() - lastEndDate.getTime());
+        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
+        
+        // Si la diferencia es mayor a 1 día, hay un hueco
+        if (diffDays > 1) {
+          const confirmGap = window.confirm(
+            `Hay un intervalo de ${diffDays - 1} días entre el último período fiscal y el nuevo. ` +
+            `El último período termina el ${formatDateSpanish(lastFiscalYear.end_date)} y el nuevo comienza el ${formatDateSpanish(formData.start_date)}. ` +
+            `¿Desea continuar de todos modos?`
+          );
+          
+          if (!confirmGap) {
+            setLoading(false);
+            return;
+          }
+        }
+        
+        // Si la nueva fecha de inicio es anterior al fin del último período, es inválido
+        if (newStartDate <= lastEndDate) {
+          toast.error(`La fecha de inicio debe ser posterior al último período fiscal (${formatDateSpanish(lastFiscalYear.end_date)})`);
+          return;
+        }
+      }
+      
+      // Insertar el año fiscal
+      const { data, error } = await supabase
+        .from('accounting_periods')
+        .insert([
+          {
+            name: formData.name,
+            start_date: formData.start_date,
+            end_date: formData.end_date,
+            period_type: 'yearly',
+            is_month: false,
+            is_closed: false,
+            is_active: true,
+            created_by: user?.id,
+            notes: formData.notes || null,
+            fiscal_year_type: effectiveFiscalYearType
+          }
+        ])
+        .select()
+        .single();
       
       if (error) {
-        throw new Error(error);
+        throw error;
       }
       
-      if (!data) {
-        throw new Error('No se pudo crear el año fiscal');
+      // Generar automáticamente los períodos mensuales
+      if (data) {
+        // Llamar al servicio para inicializar períodos mensuales
+        await handleInitializeMonthlyPeriods(data.id);
+        
+        // Refrescar los datos
+        fetchData();
+        
+        // Cerrar el modal y mostrar mensaje de éxito
+        setShowCreateModal(false);
+        toast.success('Año fiscal creado exitosamente');
       }
-      
-      toast.success(`Año fiscal ${formData.name} creado correctamente con sus períodos mensuales`);
-      
-      // Cerrar modal y refrescar datos
-      setShowCreateModal(false);
-      setFormData({
-        name: '',
-        start_date: '',
-        end_date: '',
-        notes: '',
-        fiscal_year_type: 'calendar'
-      });
-      fetchData();
-      
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error al crear año fiscal:', error);
-      toast.error(`Error: ${error.message || 'No se pudo crear el año fiscal'}`);
+      toast.error('Error al crear el año fiscal');
     } finally {
       setLoading(false);
     }
   };
 
+  // Obtiene la configuración de la empresa para saber el tipo de año fiscal
+  async function fetchCompanySettings() {
+    try {
+      const { data, error } = await supabase
+        .from('company_settings')
+        .select('fiscal_year_type')
+        .single();
+
+      if (error) {
+        console.error('Error al obtener configuración de la empresa:', error);
+        return;
+      }
+
+      if (data && data.fiscal_year_type) {
+        setCompanyFiscalYearType(data.fiscal_year_type as FiscalYearType);
+      }
+    } catch (error) {
+      console.error('Error al obtener tipo de año fiscal de la empresa:', error);
+    }
+  }
+
   // Función para inicializar el formulario con valores apropiados
   const initializeFormData = (fiscalYearType: FiscalYearType = 'calendar') => {
-    const currentYear = new Date().getFullYear();
-    let startDate = '';
-    let endDate = '';
+    // Si hay un tipo de año fiscal definido en la empresa, usar ese
+    const effectiveFiscalYearType = companyFiscalYearType || fiscalYearType;
+    
+    // Determinar el siguiente año fiscal basado en los existentes
+    let nextFiscalYear = getNextFiscalYearDates(effectiveFiscalYearType);
+    
+    setFormData({
+      name: nextFiscalYear.name,
+      start_date: nextFiscalYear.startDate,
+      end_date: nextFiscalYear.endDate,
+      fiscal_year_type: effectiveFiscalYearType,
+      notes: ''
+    });
+  };
+
+  // Determina las fechas del siguiente año fiscal basado en los existentes
+  const getNextFiscalYearDates = (fiscalYearType: FiscalYearType) => {
+    const now = new Date();
+    let startDate = new Date();
+    let endDate = new Date();
     let yearName = '';
     
-    // Configurar fechas según el tipo de año fiscal
+    // Si hay años fiscales existentes, calcular el siguiente
+    if (fiscalYears.length > 0) {
+      // Ordenar años fiscales por fecha de inicio, de más reciente a más antiguo
+      const sortedYears = [...fiscalYears].sort((a, b) => 
+        new Date(b.end_date).getTime() - new Date(a.end_date).getTime()
+      );
+      
+      const lastFiscalYear = sortedYears[0];
+      
+      // Calcular el siguiente año fiscal basado en el último
+      if (lastFiscalYear) {
+        const lastEndDate = new Date(lastFiscalYear.end_date);
+        startDate = new Date(lastEndDate);
+        startDate.setDate(startDate.getDate() + 1); // Día siguiente al último día del año fiscal anterior
+        
+        const startYear = startDate.getFullYear();
+        
+        // Determinar el inicio y fin basado en el tipo de año fiscal
+        switch (fiscalYearType) {
+          case 'calendar': // Enero a Diciembre
+            // Ajustar al 1 de enero del año correspondiente
+            startDate = new Date(startYear, 0, 1); // 1 de Enero
+            endDate = new Date(startYear, 11, 31); // 31 de Diciembre
+            break;
+            
+          case 'fiscal_mar': // Abril a Marzo
+            // Ajustar al 1 de abril
+            startDate = new Date(startYear, 3, 1); // 1 de Abril
+            endDate = new Date(startYear + 1, 2, 31); // 31 de Marzo del año siguiente
+            break;
+            
+          case 'fiscal_jun': // Julio a Junio
+            // Ajustar al 1 de julio
+            startDate = new Date(startYear, 6, 1); // 1 de Julio
+            endDate = new Date(startYear + 1, 5, 30); // 30 de Junio del año siguiente
+            break;
+            
+          case 'fiscal_sep': // Octubre a Septiembre
+            // Ajustar al 1 de octubre
+            startDate = new Date(startYear, 9, 1); // 1 de Octubre
+            endDate = new Date(startYear + 1, 8, 30); // 30 de Septiembre del año siguiente
+            break;
+        }
+      }
+    } else {
+      // Si no hay años fiscales, crear el primero según el tipo
+      const currentYear = now.getFullYear();
+      
+      switch (fiscalYearType) {
+        case 'calendar': // Enero a Diciembre
+          startDate = new Date(currentYear, 0, 1); // 1 de Enero
+          endDate = new Date(currentYear, 11, 31); // 31 de Diciembre
+          break;
+          
+        case 'fiscal_mar': // Abril a Marzo
+          startDate = new Date(currentYear, 3, 1); // 1 de Abril
+          endDate = new Date(currentYear + 1, 2, 31); // 31 de Marzo del año siguiente
+          break;
+          
+        case 'fiscal_jun': // Julio a Junio
+          startDate = new Date(currentYear, 6, 1); // 1 de Julio
+          endDate = new Date(currentYear + 1, 5, 30); // 30 de Junio del año siguiente
+          break;
+          
+        case 'fiscal_sep': // Octubre a Septiembre
+          startDate = new Date(currentYear, 9, 1); // 1 de Octubre
+          endDate = new Date(currentYear + 1, 8, 30); // 30 de Septiembre del año siguiente
+          break;
+      }
+    }
+    
+    const startDateStr = startDate.toISOString().split('T')[0];
+    const endDateStr = endDate.toISOString().split('T')[0];
+    
+    // Generar nombre para el año fiscal basado en el tipo y año
+    const startYear = startDate.getFullYear();
+    const endYear = endDate.getFullYear();
+    
     switch (fiscalYearType) {
       case 'calendar':
-        startDate = `${currentYear}-01-01`;
-        endDate = `${currentYear}-12-31`;
-        yearName = `Año Calendario ${currentYear}`;
+        yearName = `Año Fiscal ${startYear}`;
         break;
       case 'fiscal_mar':
-        startDate = `${currentYear}-04-01`;
-        endDate = `${currentYear + 1}-03-31`;
-        yearName = `Año Fiscal Abr ${currentYear} - Mar ${currentYear + 1}`;
+        yearName = `Año Fiscal Abr ${startYear} - Mar ${endYear}`;
         break;
       case 'fiscal_jun':
-        startDate = `${currentYear}-07-01`;
-        endDate = `${currentYear + 1}-06-30`;
-        yearName = `Año Fiscal Jul ${currentYear} - Jun ${currentYear + 1}`;
+        yearName = `Año Fiscal Jul ${startYear} - Jun ${endYear}`;
         break;
       case 'fiscal_sep':
-        startDate = `${currentYear}-10-01`;
-        endDate = `${currentYear + 1}-09-30`;
-        yearName = `Año Fiscal Oct ${currentYear} - Sep ${currentYear + 1}`;
+        yearName = `Año Fiscal Oct ${startYear} - Sep ${endYear}`;
         break;
     }
     
-    setFormData({
-      name: yearName,
-      start_date: startDate,
-      end_date: endDate,
-      notes: '',
-      fiscal_year_type: fiscalYearType
-    });
+    return {
+      startDate: startDateStr,
+      endDate: endDateStr,
+      name: yearName
+    };
   };
 
   // Renderizar períodos mensuales para un año fiscal
@@ -655,7 +821,7 @@ export function FiscalYearSettings() {
               <div>
                 <h4 className="font-medium">{period.name}</h4>
                 <p className="text-sm text-gray-500">
-                  {new Date(period.start_date).toLocaleDateString()} - {new Date(period.end_date).toLocaleDateString()}
+                  {formatDateSpanish(period.start_date)} - {formatDateSpanish(period.end_date)}
                 </p>
                 <p className="text-xs text-gray-500 mt-1">
                   {period.id && periodStats[period.id] 
@@ -787,7 +953,7 @@ export function FiscalYearSettings() {
                   <div>
                     <h3 className="font-medium">{year.name}</h3>
                     <p className="text-sm text-gray-500">
-                      {new Date(year.start_date).toLocaleDateString()} - {new Date(year.end_date).toLocaleDateString()}
+                      {formatDateSpanish(year.start_date)} - {formatDateSpanish(year.end_date)}
                     </p>
                   </div>
                 </div>
@@ -921,18 +1087,24 @@ export function FiscalYearSettings() {
               required
               value={formData.fiscal_year_type}
               onChange={handleCreateFormChange}
-              className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+              disabled={!!companyFiscalYearType}
+              className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm ${!!companyFiscalYearType ? 'bg-gray-50' : ''}`}
             >
               <option value="calendar">Año Calendario (Ene-Dic)</option>
               <option value="fiscal_mar">Año Fiscal (Abr-Mar)</option>
               <option value="fiscal_jun">Año Fiscal (Jul-Jun)</option>
               <option value="fiscal_sep">Año Fiscal (Oct-Sep)</option>
             </select>
+            {!!companyFiscalYearType && (
+              <p className="mt-1 text-xs text-amber-600">
+                El tipo de año fiscal debe coincidir con el configurado en la empresa y no puede modificarse.
+              </p>
+            )}
             <p className="mt-1 text-xs text-gray-500">
-              {formData.fiscal_year_type === 'calendar' && 'Período: Enero a Diciembre (01/01/2023 - 31/12/2023)'}
-              {formData.fiscal_year_type === 'fiscal_mar' && 'Período: Abril a Marzo (01/04/2023 - 31/03/2024)'}
-              {formData.fiscal_year_type === 'fiscal_jun' && 'Período: Julio a Junio (01/07/2023 - 30/06/2024)'}
-              {formData.fiscal_year_type === 'fiscal_sep' && 'Período: Octubre a Septiembre (01/10/2023 - 30/09/2024)'}
+              {formData.fiscal_year_type === 'calendar' && 'Período: Enero a Diciembre (1 de enero - 31 de diciembre)'}
+              {formData.fiscal_year_type === 'fiscal_mar' && 'Período: Abril a Marzo (1 de abril - 31 de marzo del año siguiente)'}
+              {formData.fiscal_year_type === 'fiscal_jun' && 'Período: Julio a Junio (1 de julio - 30 de junio del año siguiente)'}
+              {formData.fiscal_year_type === 'fiscal_sep' && 'Período: Octubre a Septiembre (1 de octubre - 30 de septiembre del año siguiente)'}
             </p>
           </div>
           
@@ -951,6 +1123,9 @@ export function FiscalYearSettings() {
                 disabled={true}
                 className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-gray-50"
               />
+              <p className="mt-1 text-xs text-gray-500">
+                {formData.start_date && formatDateSpanish(formData.start_date)}
+              </p>
             </div>
             
             <div>
@@ -967,6 +1142,9 @@ export function FiscalYearSettings() {
                 disabled={true}
                 className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-gray-50"
               />
+              <p className="mt-1 text-xs text-gray-500">
+                {formData.end_date && formatDateSpanish(formData.end_date)}
+              </p>
             </div>
           </div>
           
