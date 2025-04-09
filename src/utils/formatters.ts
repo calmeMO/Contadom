@@ -68,7 +68,8 @@ export function formatSafeDate(date: string | Date | null | undefined, format: s
       return '';
     }
     
-    return dateObj.toLocaleDateString('es-DO', {
+    // Siempre usar el formato español dd/MM/yyyy
+    return dateObj.toLocaleDateString('es-ES', {
       day: '2-digit',
       month: '2-digit',
       year: 'numeric'

@@ -4,6 +4,7 @@ import Decimal from 'decimal.js';
 import { isValid, format, parseISO } from 'date-fns';
 import { isMonthlyPeriodClosed } from './accountingPeriodService';
 import { v4 as uuidv4 } from 'uuid';
+import { es } from 'date-fns/locale';
 
 // Tipos de Ajuste Contable
 export type AdjustmentType = 
@@ -236,9 +237,14 @@ export async function validateDateInPeriod(date: string, periodId: string): Prom
     checkDate.setHours(12, 0, 0, 0);
     
     if (checkDate < startDate || checkDate > endDate) {
+      // Formatear fechas en formato español
+      const formattedStartDate = format(startDate, 'dd/MM/yyyy', { locale: es });
+      const formattedEndDate = format(endDate, 'dd/MM/yyyy', { locale: es });
+      const formattedCheckDate = format(checkDate, 'dd/MM/yyyy', { locale: es });
+      
       return { 
         valid: false, 
-        message: `La fecha debe estar dentro del período ${data.name} (${data.start_date} - ${data.end_date})` 
+        message: `La fecha ${formattedCheckDate} debe estar dentro del período ${data.name} (${formattedStartDate} - ${formattedEndDate})` 
       };
     }
     
@@ -269,15 +275,14 @@ export async function fetchJournalEntries(filters: JournalEntriesFilter = {}): P
     
     // Aplicar filtros
     if (filters.monthlyPeriodId) {
-      console.log('Filtrando por período mensual:', filters.monthlyPeriodId);
+      // Si hay un período mensual específico seleccionado, filtrar solo por ese
+      console.log('Filtrando por período mensual específico:', filters.monthlyPeriodId);
       query = query.eq('monthly_period_id', filters.monthlyPeriodId);
-    }
-    
-    // Filtro por año fiscal - usar otro enfoque
-    if (filters.fiscalYearId) {
-      console.log('Filtrando por año fiscal:', filters.fiscalYearId);
+    } else if (filters.fiscalYearId) {
+      // Si no hay período mensual específico pero sí hay año fiscal, mostrar todos los períodos de ese año
+      console.log('Filtrando por todos los períodos del año fiscal:', filters.fiscalYearId);
       try {
-        // Primero, obtener los ids de los períodos mensuales de este año fiscal
+        // Obtener los ids de los períodos mensuales de este año fiscal
         const { data: periodIds, error: periodsError } = await supabase
           .from('monthly_accounting_periods')
           .select('id')

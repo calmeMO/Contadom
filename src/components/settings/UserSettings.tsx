@@ -11,6 +11,9 @@ interface UserData {
   role: 'admin' | 'accountant' | 'user';
   created_at: string;
   is_active: boolean;
+  account_status: 'active' | 'inactive' | 'suspended' | 'archived';
+  login_attempts: number;
+  locked_until: string | null;
 }
 
 interface UserFormData {
@@ -18,6 +21,7 @@ interface UserFormData {
   full_name: string;
   role: 'admin' | 'accountant' | 'user';
   password?: string;
+  account_status: 'active' | 'inactive' | 'suspended' | 'archived';
 }
 
 // Componente Modal
@@ -58,11 +62,14 @@ export function UserSettings() {
   const [editModalOpen, setEditModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [selectedUser, setSelectedUser] = useState<UserData | null>(null);
+  const [onlineUsers, setOnlineUsers] = useState<string[]>([]);
+  const [inactiveUsers, setInactiveUsers] = useState<string[]>([]);
   const [formData, setFormData] = useState<UserFormData>({
     email: '',
     full_name: '',
     role: 'user',
-    password: ''
+    password: '',
+    account_status: 'active'
   });
   const [syncStats, setSyncStats] = useState<any>(null);
   const [fixRolesStats, setFixRolesStats] = useState<any>(null);
@@ -87,10 +94,22 @@ export function UserSettings() {
         if (error) throw error;
         
         if (data) {
-          setCurrentUser(data as UserData);
+          // Si no existe account_status, lo tratamos como "active" por compatibilidad
+          const userData = {
+            ...data,
+            account_status: data.account_status || 'active',
+            login_attempts: data.login_attempts || 0,
+            locked_until: data.locked_until || null
+          } as UserData;
+          
+          setCurrentUser(userData);
           // Solo administradores pueden ver y gestionar usuarios
-          if (data.role === 'admin') {
-          fetchUsers();
+          if (userData.role === 'admin') {
+            fetchUsers();
+            // Iniciar monitoreo de sesiones activas
+            fetchActiveSessions();
+            const sessionInterval = setInterval(fetchActiveSessions, 60000); // cada minuto
+            return () => clearInterval(sessionInterval);
           }
         }
       }
@@ -119,13 +138,61 @@ export function UserSettings() {
       
       console.log(`Se encontraron ${data?.length || 0} perfiles en la base de datos:`, data);
       
+      // Formatear datos para incluir account_status si no existe
+      const formattedData = data?.map(user => ({
+        ...user,
+        account_status: user.account_status || (user.is_active ? 'active' : 'inactive'),
+        login_attempts: user.login_attempts || 0,
+        locked_until: user.locked_until || null
+      })) || [];
+      
       // Mostrar todos los usuarios para depuración, incluso los inactivos
-      setUsers(data || []);
+      setUsers(formattedData);
     } catch (error) {
       console.error('Error al cargar usuarios:', error);
       toast.error('No se pudieron cargar los usuarios');
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Obtener sesiones activas
+  const fetchActiveSessions = async () => {
+    try {
+      // Consultar sesiones activas (menos de 30 minutos de inactividad)
+      const thirtyMinutesAgo = new Date();
+      thirtyMinutesAgo.setMinutes(thirtyMinutesAgo.getMinutes() - 30);
+      
+      const { data, error } = await supabase
+        .from('sessions')
+        .select('user_id, updated_at')
+        .gt('updated_at', thirtyMinutesAgo.toISOString());
+        
+      if (error) {
+        console.error('Error al consultar sesiones:', error);
+        return;
+      }
+      
+      // Usuarios en línea (actualizados en los últimos 5 minutos)
+      const fiveMinutesAgo = new Date();
+      fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
+      
+      const onlineUserIds = data
+        .filter(session => new Date(session.updated_at) > fiveMinutesAgo)
+        .map(session => session.user_id);
+        
+      // Usuarios inactivos (entre 5 y 30 minutos sin actividad)
+      const inactiveUserIds = data
+        .filter(session => {
+          const sessionDate = new Date(session.updated_at);
+          return sessionDate <= fiveMinutesAgo && sessionDate > thirtyMinutesAgo;
+        })
+        .map(session => session.user_id);
+      
+      setOnlineUsers(onlineUserIds);
+      setInactiveUsers(inactiveUserIds);
+    } catch (error) {
+      console.error('Error al obtener sesiones activas:', error);
     }
   };
 
@@ -230,7 +297,8 @@ export function UserSettings() {
       console.log('Creando usuario con datos:', {
         email: formData.email,
         full_name: formData.full_name,
-        role: formData.role
+        role: formData.role,
+        account_status: formData.account_status
       });
       
       // PASO 1: Crear el usuario con la función Edge
@@ -281,7 +349,10 @@ export function UserSettings() {
             email: formData.email,
             full_name: formData.full_name,
             role: formData.role,
-            is_active: true
+            is_active: formData.account_status === 'active',
+            account_status: formData.account_status,
+            login_attempts: 0,
+            locked_until: null
           });
 
         if (createProfileError) {
@@ -292,7 +363,9 @@ export function UserSettings() {
         console.log('Perfil encontrado:', createdProfile);
         
         // PASO 3: Verificar que el perfil tiene los datos correctos
-        if (createdProfile.full_name !== formData.full_name || createdProfile.role !== formData.role) {
+        if (createdProfile.full_name !== formData.full_name || 
+            createdProfile.role !== formData.role || 
+            createdProfile.account_status !== formData.account_status) {
           console.log('Los datos del perfil no coinciden, actualizando...');
           
           // Actualizar el perfil con los datos correctos
@@ -301,6 +374,8 @@ export function UserSettings() {
             .update({
               full_name: formData.full_name,
               role: formData.role,
+              is_active: formData.account_status === 'active',
+              account_status: formData.account_status,
               updated_at: new Date().toISOString()
             })
             .eq('id', newUserId);
@@ -358,6 +433,8 @@ export function UserSettings() {
           full_name: formData.full_name,
           role: formData.role,
           email: formData.email,
+          account_status: formData.account_status,
+          is_active: formData.account_status === 'active' || formData.account_status === 'inactive',
           updated_at: new Date().toISOString()
         })
         .eq('id', selectedUser.id);
@@ -501,7 +578,8 @@ export function UserSettings() {
       email: '',
       full_name: '',
       role: 'user',
-      password: ''
+      password: '',
+      account_status: 'active'
     });
   };
 
@@ -511,7 +589,8 @@ export function UserSettings() {
     setFormData({
       email: user.email,
       full_name: user.full_name || '',
-      role: user.role
+      role: user.role,
+      account_status: user.account_status || 'active'
     });
     setEditModalOpen(true);
   };
@@ -563,6 +642,77 @@ export function UserSettings() {
       .join(' ');
     
     return <span className="text-gray-500">{formattedName} <small>(sin nombre)</small></span>;
+  };
+
+  // Restablecer intentos de inicio de sesión fallidos
+  const resetLoginAttempts = async (userId: string) => {
+    try {
+      const { error } = await supabase
+        .from('user_profiles')
+        .update({
+          login_attempts: 0,
+          locked_until: null,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', userId);
+        
+      if (error) throw error;
+      
+      toast.success('Se han restablecido los intentos de inicio de sesión');
+      fetchUsers();
+    } catch (error: any) {
+      console.error('Error al restablecer intentos:', error);
+      toast.error(`Error: ${error.message}`);
+    }
+  };
+
+  // Obtener estado de sesión de un usuario
+  const getUserSessionStatus = (userId: string) => {
+    if (onlineUsers.includes(userId)) return 'online';
+    if (inactiveUsers.includes(userId)) return 'inactive';
+    return 'offline';
+  };
+  
+  // Obtener etiqueta para el estado de la cuenta
+  const getAccountStatusLabel = (status: string) => {
+    switch (status) {
+      case 'active': return 'Activo';
+      case 'inactive': return 'Inactivo';
+      case 'suspended': return 'Suspendido';
+      case 'archived': return 'Archivado';
+      default: return 'Desconocido';
+    }
+  };
+  
+  // Obtener color para el estado de la cuenta
+  const getAccountStatusColor = (status: string) => {
+    switch (status) {
+      case 'active': return 'bg-green-100 text-green-800';
+      case 'inactive': return 'bg-yellow-100 text-yellow-800';
+      case 'suspended': return 'bg-red-100 text-red-800';
+      case 'archived': return 'bg-gray-100 text-gray-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
+  };
+  
+  // Obtener etiqueta para estado de sesión
+  const getSessionStatusLabel = (status: string) => {
+    switch (status) {
+      case 'online': return 'En línea';
+      case 'inactive': return 'Inactivo';
+      case 'offline': return 'Desconectado';
+      default: return 'Desconocido';
+    }
+  };
+  
+  // Obtener color para estado de sesión
+  const getSessionStatusColor = (status: string) => {
+    switch (status) {
+      case 'online': return 'bg-green-100 text-green-800';
+      case 'inactive': return 'bg-yellow-100 text-yellow-800';
+      case 'offline': return 'bg-gray-100 text-gray-800';
+      default: return 'bg-gray-100 text-gray-800';
+    }
   };
 
   // Si el usuario no es administrador, mostrar mensaje de acceso restringido
@@ -712,13 +862,17 @@ export function UserSettings() {
                 <th className="px-4 py-3 text-sm font-medium text-gray-500">Nombre</th>
                 <th className="px-4 py-3 text-sm font-medium text-gray-500">Email</th>
                 <th className="px-4 py-3 text-sm font-medium text-gray-500">Rol</th>
-                <th className="px-4 py-3 text-sm font-medium text-gray-500">Estado</th>
+                <th className="px-4 py-3 text-sm font-medium text-gray-500">Estado Cuenta</th>
+                <th className="px-4 py-3 text-sm font-medium text-gray-500">Estado Sesión</th>
+                <th className="px-4 py-3 text-sm font-medium text-gray-500">Intentos</th>
                 <th className="px-4 py-3 text-sm font-medium text-gray-500">Registro</th>
                 <th className="px-4 py-3 text-sm font-medium text-gray-500">Acciones</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200">
-              {users.map(user => (
+              {users.map(user => {
+                const sessionStatus = getUserSessionStatus(user.id);
+                return (
                 <tr key={user.id} className="hover:bg-gray-50">
                   <td className="px-4 py-3 text-sm text-gray-500 font-mono">{user.id.substring(0, 8)}...</td>
                   <td className="px-4 py-3 text-sm">{renderUserName(user)}</td>
@@ -733,16 +887,33 @@ export function UserSettings() {
                       </div>
                   </td>
                   <td className="px-4 py-3 text-sm">
-                    {user.is_active !== false ? (
-                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                        <CheckCircle size={12} className="mr-1" />
-                        Activo
+                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getAccountStatusColor(user.account_status || 'active')}`}>
+                      {getAccountStatusLabel(user.account_status || 'active')}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-sm">
+                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getSessionStatusColor(sessionStatus)}`}>
+                      {getSessionStatusLabel(sessionStatus)}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-sm">
+                    {user.login_attempts > 0 ? (
+                      <div className="flex items-center">
+                        <span className={`mr-2 ${user.login_attempts >= 3 ? 'text-red-500 font-medium' : 'text-gray-500'}`}>
+                          {user.login_attempts}
                         </span>
+                        {user.login_attempts >= 3 && (
+                          <button
+                            onClick={() => resetLoginAttempts(user.id)}
+                            className="text-blue-500 hover:text-blue-700 text-xs"
+                            title="Restablecer intentos"
+                          >
+                            Restablecer
+                          </button>
+                        )}
+                      </div>
                     ) : (
-                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                        <XCircle size={12} className="mr-1" />
-                        Inactivo
-                      </span>
+                      <span className="text-gray-400">0</span>
                     )}
                   </td>
                   <td className="px-4 py-3 text-sm">
@@ -771,7 +942,7 @@ export function UserSettings() {
                         </div>
                   </td>
                 </tr>
-              ))}
+              );})}
             </tbody>
           </table>
         </div>
@@ -837,6 +1008,20 @@ export function UserSettings() {
                 <option value="admin">Administrador</option>
                 </select>
               </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Estado de la Cuenta</label>
+              <select
+                name="account_status"
+                value={formData.account_status}
+                onChange={handleInputChange}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              >
+                <option value="active">Activo</option>
+                <option value="inactive">Inactivo</option>
+                <option value="suspended">Suspendido</option>
+                <option value="archived">Archivado</option>
+              </select>
+            </div>
             <div className="flex justify-end space-x-3 pt-4">
                 <button
                   type="button"
@@ -898,6 +1083,20 @@ export function UserSettings() {
                 <option value="user">Usuario</option>
                 <option value="accountant">Contador</option>
                 <option value="admin">Administrador</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Estado de la Cuenta</label>
+              <select
+                name="account_status"
+                value={formData.account_status}
+                onChange={handleInputChange}
+                className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              >
+                <option value="active">Activo</option>
+                <option value="inactive">Inactivo</option>
+                <option value="suspended">Suspendido</option>
+                <option value="archived">Archivado</option>
               </select>
             </div>
             <div className="flex justify-end space-x-3 pt-4">

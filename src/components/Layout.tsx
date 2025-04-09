@@ -129,12 +129,6 @@ export function Layout() {
       roles: ['admin', 'accountant', 'user']
     },
     {
-      name: 'Cierre Contable',
-      path: '/closing',
-      icon: <Lock size={18} />,
-      roles: ['admin']
-    },
-    {
       name: 'Configuración',
       path: '/settings',
       icon: <Settings size={18} />,

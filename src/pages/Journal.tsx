@@ -24,7 +24,9 @@ import {
   History,
   Settings,
   Shield,
-  Table
+  Table,
+  Lock,
+  AlertCircle
 } from 'lucide-react';
 import JournalEntryForm from '../components/JournalEntryForm';
 import Modal from '../components/ui/Modal';
@@ -174,23 +176,36 @@ export default function Journal() {
       if (accountsError) throw accountsError;
       setAccounts(accountsData || []);
       
-      // Cargar períodos fiscales
+      // Cargar períodos fiscales (incluir todos, cerrados y activos)
       const { data: fiscalYearsData, error: fiscalYearsError } = await fetchFiscalYears();
       
       if (fiscalYearsError) throw fiscalYearsError;
       setFiscalYears(fiscalYearsData || []);
       
-      // Cargar períodos mensuales disponibles
-      const { data: periodsData, error: periodsError } = await getAvailablePeriodsForEntry();
+      // Cargar períodos mensuales (incluir todos, incluso cerrados e inactivos)
+      // En lugar de usar getAvailablePeriodsForEntry que solo trae los disponibles
+      const { data: allPeriodsData, error: periodsError } = await supabase
+        .from('monthly_accounting_periods_with_users')
+        .select(`
+          *,
+          fiscal_year:fiscal_year_id(
+            id,
+            name,
+            is_closed,
+            is_active
+          )
+        `)
+        .order('year', { ascending: false })
+        .order('month', { ascending: true });
       
       if (periodsError) throw periodsError;
-      setMonthlyPeriods(periodsData || []);
+      setMonthlyPeriods(allPeriodsData || []);
       
       // Find current fiscal year (not closed and active)
       const currentFiscalYear = fiscalYearsData?.find(year => !year.is_closed && year.is_active);
 
       // Get current monthly period (associated with current fiscal year, not closed and active)
-      const currentMonthlyPeriod = periodsData
+      const currentMonthlyPeriod = allPeriodsData
         ?.filter(p => p.fiscal_year_id === currentFiscalYear?.id && !p.is_closed && p.is_active)
         .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime())[0];
       
@@ -224,6 +239,45 @@ export default function Journal() {
         fetchEntries();
     }
   }, [currentFiscalYearId, currentMonthlyPeriodId, statusFilter, entryTypeFilter, searchTerm, sortField, sortOrder, excludeVoided]);
+
+  // Manejar cambio de año fiscal
+  const handleFiscalYearChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newFiscalYearId = e.target.value;
+    setCurrentFiscalYearId(newFiscalYearId);
+    
+    // Al cambiar el año fiscal, resetear el período mensual
+    setCurrentMonthlyPeriodId('');
+    
+    // Si se selecciona un nuevo año fiscal, intentar seleccionar el período mensual más reciente de ese año
+    if (newFiscalYearId) {
+      const periodsForThisYear = monthlyPeriods
+        .filter(p => p.fiscal_year_id === newFiscalYearId && !p.is_closed && p.is_active)
+        .sort((a, b) => new Date(b.end_date).getTime() - new Date(a.end_date).getTime());
+      
+      if (periodsForThisYear.length > 0) {
+        // Seleccionar el período más reciente no cerrado
+        setCurrentMonthlyPeriodId(periodsForThisYear[0].id || '');
+      }
+    }
+  };
+
+  // Manejar cambio de período mensual
+  const handleMonthlyPeriodChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const periodId = e.target.value;
+    setCurrentMonthlyPeriodId(periodId);
+    
+    // Si se selecciona "Todos" (valor vacío), mantener el año fiscal actual
+    // Si se selecciona un período específico, asegurarse que el año fiscal corresponda
+    if (periodId) {
+      const selectedPeriod = monthlyPeriods.find(p => p.id === periodId);
+      if (selectedPeriod && selectedPeriod.fiscal_year_id !== currentFiscalYearId) {
+        // Actualizar el año fiscal para que corresponda con el período seleccionado
+        setCurrentFiscalYearId(selectedPeriod.fiscal_year_id);
+      }
+    }
+    // Cuando se selecciona "Todos", no cambiamos el año fiscal para mantener la consulta
+    // filtrada por todos los períodos del año seleccionado
+  };
 
   // Crear nuevo asiento regular
   const handleCreate = () => {
@@ -289,6 +343,23 @@ export default function Journal() {
     }
   };
 
+  // Verificar si un período está cerrado o inactivo
+  const isPeriodClosedOrInactive = (periodId: string): boolean => {
+    const period = monthlyPeriods.find(p => p.id === periodId);
+    
+    if (!period) return true; // Si no encontramos el período, asumimos restricción
+    
+    // Verificar si el período está cerrado o si no está activo
+    if (period.is_closed || !period.is_active) return true;
+    
+    // Verificar además el estado del año fiscal asociado
+    // @ts-ignore - En la consulta extendida con join sí tenemos fiscal_year
+    const fiscalYear = period.fiscal_year;
+    if (fiscalYear && (fiscalYear.is_closed || !fiscalYear.is_active)) return true;
+    
+    return false;
+  };
+
   // Editar asiento
   const handleEdit = async (id: string) => {
     // Verificar autenticación
@@ -337,6 +408,13 @@ export default function Journal() {
       if (entry.status === 'voided') {
         console.error('❌ No se puede editar un asiento anulado');
         toast.error('No se puede editar un asiento anulado');
+        return;
+      }
+      
+      // Verificar que el periodo no esté cerrado o inactivo
+      if (isPeriodClosedOrInactive(entry.monthly_period_id)) {
+        console.error('❌ No se puede editar un asiento de un período cerrado o inactivo');
+        toast.error('No se puede editar un asiento de un período cerrado o inactivo');
         return;
       }
       
@@ -425,6 +503,13 @@ export default function Journal() {
         return;
       }
       
+      // Verificar que el periodo no esté cerrado o inactivo
+      if (isPeriodClosedOrInactive(entry.monthly_period_id)) {
+        console.error('❌ No se puede aprobar un asiento de un período cerrado o inactivo');
+        toast.error('No se puede aprobar un asiento de un período cerrado o inactivo');
+        return;
+      }
+      
       // Solicitar confirmación
       const confirmed = window.confirm('¿Está seguro de aprobar este asiento? Una vez aprobado, no podrá editarlo ni eliminarlo.');
       if (!confirmed) return;
@@ -501,6 +586,13 @@ export default function Journal() {
       if (entry.status === 'voided') {
         console.error('❌ El asiento ya se encuentra anulado');
         toast.error('El asiento ya se encuentra anulado');
+        return;
+      }
+      
+      // Verificar que el periodo no esté cerrado o inactivo
+      if (isPeriodClosedOrInactive(entry.monthly_period_id)) {
+        console.error('❌ No se puede anular un asiento de un período cerrado o inactivo');
+        toast.error('No se puede anular un asiento de un período cerrado o inactivo');
         return;
       }
       
@@ -594,16 +686,6 @@ export default function Journal() {
     }
   };
 
-  // Manejar cambio de período fiscal
-  const handleFiscalYearChange = (id: string) => {
-    setCurrentFiscalYearId(id);
-  };
-
-  // Manejar cambio de período mensual
-  const handleMonthlyPeriodChange = (id: string) => {
-    setCurrentMonthlyPeriodId(id);
-  };
-
   // Ordenar por campo
   const handleSort = (field: string) => {
     if (sortField === field) {
@@ -646,6 +728,119 @@ export default function Journal() {
     }
   }, [entries, user]);
 
+  // Modificar el renderizado de la tabla para incluir indicadores de períodos cerrados
+  const renderEntryRow = (entry: JournalEntry) => {
+    const isPeriodRestricted = isPeriodClosedOrInactive(entry.monthly_period_id);
+    const period = monthlyPeriods.find(p => p.id === entry.monthly_period_id);
+    
+    return (
+      <tr 
+        key={entry.id} 
+        className={`${
+          entry.status === 'voided' ? 'bg-red-50 border-l-2 border-red-300' : 
+          entry.is_approved ? 'bg-green-50' : 'hover:bg-gray-50'
+        } ${
+          isPeriodRestricted ? 'opacity-80' : ''
+        }`}
+      >
+        <td className="px-4 py-3 whitespace-nowrap text-sm">{entry.entry_number}</td>
+        <td className="px-4 py-3 whitespace-nowrap text-sm">{format(parseISO(entry.date), 'dd/MM/yyyy')}</td>
+        <td className="px-4 py-3 text-sm">
+            <div className="truncate max-w-xs" title={entry.description}>{entry.description}</div>
+            {entry.reference_number && <div className="text-xs text-gray-500 mt-0.5" title={`Ref: ${entry.reference_number}`}>Ref: {entry.reference_number}</div>}
+        </td>
+        <td className="px-4 py-3 text-sm">{entry.monthly_period?.name || '-'}</td>
+        <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
+           {entry.is_adjustment && (
+               <span 
+                 className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800" 
+                 title={adjustmentTypeLabel(entry.adjustment_type)}
+               >
+                 <Info size={12} className="mr-1" /> 
+                 {adjustmentTypeShort(entry.adjustment_type)}
+               </span>
+           )}
+        </td>
+        <td className="px-4 py-3 text-right whitespace-nowrap text-sm font-mono">{new Decimal(entry.total_debit).toFixed(2)}</td>
+        <td className="px-4 py-3 text-right whitespace-nowrap text-sm font-mono">{new Decimal(entry.total_credit).toFixed(2)}</td>
+        <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
+          <span className={`px-2 py-1 rounded-full text-xs font-medium 
+            ${entry.status === 'aprobado' ? 'bg-green-100 text-green-800' : 
+              entry.status === 'voided' ? 'bg-red-100 text-red-800' : 
+              'bg-yellow-100 text-yellow-800'}`}
+          >
+            {entry.status === 'voided' ? 'Anulado' : entry.status}
+          </span>
+        </td>
+        {/* Añadir indicador visual de período cerrado/inactivo */}
+        {isPeriodRestricted && (
+          <div className="absolute top-0 right-0 m-1">
+            <span className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-gray-100 text-gray-800">
+              <Lock className="w-3 h-3 mr-1" /> 
+              {period?.is_closed ? 'Período cerrado' : 'Período inactivo'}
+            </span>
+          </div>
+        )}
+        <td className="px-4 py-3 text-right text-sm font-medium">
+          <div className="flex justify-end space-x-2">
+            <button
+              onClick={() => handleView(entry.id)}
+              className="text-gray-600 hover:text-gray-900"
+              title="Ver detalles"
+              aria-label="Ver detalles"
+            >
+              <Eye size={18} />
+            </button>
+            
+            {entry.status !== 'voided' && !entry.is_approved && !isPeriodRestricted && (
+              <button
+                onClick={() => handleEdit(entry.id)}
+                className="text-blue-600 hover:text-blue-900"
+                title="Editar asiento"
+                aria-label="Editar asiento"
+              >
+                <Edit size={18} />
+              </button>
+            )}
+            
+            {entry.status !== 'voided' && !entry.is_approved && !isPeriodRestricted && user?.role === 'admin' && (
+              <button
+                onClick={() => handleApprove(entry.id)}
+                className="text-green-600 hover:text-green-900"
+                title="Aprobar asiento"
+                aria-label="Aprobar asiento"
+              >
+                <Check size={18} />
+              </button>
+            )}
+            
+            {entry.is_approved && entry.status !== 'voided' && !isPeriodRestricted && user?.role === 'admin' && (
+              <button
+                onClick={() => handleCancel(entry.id, entry.entry_number || '')}
+                className="text-red-600 hover:text-red-900"
+                title="Anular asiento"
+                aria-label="Anular asiento"
+              >
+                <XCircle size={18} />
+              </button>
+            )}
+            
+            {isPeriodRestricted && (
+              <button
+                onClick={() => toast.info('No se pueden modificar asientos en períodos cerrados o inactivos')}
+                className="text-gray-400 cursor-not-allowed"
+                title="Este asiento pertenece a un período cerrado o inactivo"
+                aria-label="Acciones deshabilitadas"
+              >
+                <Lock size={18} />
+              </button>
+            )}
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
   return (
     <div className="container mx-auto p-4 space-y-6">
       <div className="flex justify-between items-center">
@@ -679,7 +874,7 @@ export default function Journal() {
             <label className="block text-sm font-medium text-gray-700 mb-1">Año Fiscal</label>
             <select
               value={currentFiscalYearId}
-              onChange={(e) => handleFiscalYearChange(e.target.value)}
+              onChange={handleFiscalYearChange}
               className="w-full p-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500"
             >
               <option value="">Todos</option>
@@ -690,7 +885,7 @@ export default function Journal() {
             <label className="block text-sm font-medium text-gray-700 mb-1">Período Mensual</label>
             <select
               value={currentMonthlyPeriodId}
-              onChange={(e) => handleMonthlyPeriodChange(e.target.value)}
+              onChange={handleMonthlyPeriodChange}
               className="w-full p-2 border border-gray-300 rounded-md text-sm focus:ring-blue-500 focus:border-blue-500"
               disabled={!currentFiscalYearId}
             >
@@ -774,75 +969,7 @@ export default function Journal() {
               ) : entries.length === 0 ? (
                 <tr><td colSpan={9} className="py-10 text-center text-gray-500">No hay asientos que coincidan con los filtros.</td></tr>
               ) : (
-                entries.map((entry) => (
-                  <tr key={entry.id} className={`hover:bg-gray-50 ${entry.is_adjustment ? 'bg-purple-50' : ''}`}>
-                    <td className="px-4 py-3 whitespace-nowrap text-sm">{entry.entry_number}</td>
-                    <td className="px-4 py-3 whitespace-nowrap text-sm">{format(parseISO(entry.date), 'dd/MM/yyyy')}</td>
-                    <td className="px-4 py-3 text-sm">
-                        <div className="truncate max-w-xs" title={entry.description}>{entry.description}</div>
-                        {entry.reference_number && <div className="text-xs text-gray-500 mt-0.5" title={`Ref: ${entry.reference_number}`}>Ref: {entry.reference_number}</div>}
-                    </td>
-                    <td className="px-4 py-3 text-sm">{entry.monthly_period?.name || '-'}</td>
-                    <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
-                       {entry.is_adjustment && (
-                           <span 
-                             className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800" 
-                             title={adjustmentTypeLabel(entry.adjustment_type)}
-                           >
-                             <Info size={12} className="mr-1" /> 
-                             {adjustmentTypeShort(entry.adjustment_type)}
-                           </span>
-                       )}
-                    </td>
-                    <td className="px-4 py-3 text-right whitespace-nowrap text-sm font-mono">{new Decimal(entry.total_debit).toFixed(2)}</td>
-                    <td className="px-4 py-3 text-right whitespace-nowrap text-sm font-mono">{new Decimal(entry.total_credit).toFixed(2)}</td>
-                    <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium 
-                        ${entry.status === 'aprobado' ? 'bg-green-100 text-green-800' : 
-                          entry.status === 'voided' ? 'bg-red-100 text-red-800' : 
-                          'bg-yellow-100 text-yellow-800'}`}
-                      >
-                        {entry.status === 'voided' ? 'Anulado' : entry.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-center whitespace-nowrap text-sm">
-                      <div className="flex justify-center items-center space-x-1">
-                        {/* Botón de Editar - solo visible para asientos pendientes */}
-                        {entry.status === 'pendiente' && (
-                          <button 
-                            onClick={() => handleEdit(entry.id)} 
-                            className="p-1 text-blue-500 hover:text-blue-700 hover:bg-blue-100 rounded-full" 
-                            title="Editar Asiento"
-                          >
-                            <Edit size={16} />
-                          </button>
-                        )}
-
-                        {/* Botón de Aprobar - solo visible para administradores y asientos pendientes */}
-                        {user?.role === 'admin' && entry.status === 'pendiente' && (
-                          <button 
-                            onClick={() => handleApprove(entry.id)} 
-                            className="p-1 text-green-500 hover:text-green-700 hover:bg-green-100 rounded-full" 
-                            title="Aprobar Asiento"
-                          >
-                            <CheckCircle size={16} />
-                          </button>
-                        )}
-
-                        {/* Botón de Anular - solo visible para administradores y asientos aprobados */}
-                        {user?.role === 'admin' && entry.status === 'aprobado' && (
-                          <button 
-                            onClick={() => handleCancel(entry.id, entry.entry_number)} 
-                            className="p-1 text-yellow-500 hover:text-yellow-700 hover:bg-yellow-100 rounded-full" 
-                            title="Anular Asiento"
-                          >
-                            <XCircle size={16} />
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                entries.map((entry) => renderEntryRow(entry))
               )}
             </tbody>
           </table>
@@ -905,6 +1032,21 @@ export default function Journal() {
           </div>
         </Modal>
       )}
+
+      {/* Añadir mensaje informativo sobre períodos cerrados/inactivos */}
+      <div className="mb-6 bg-blue-50 border-l-4 border-blue-500 p-4 rounded-md">
+        <div className="flex">
+          <div className="flex-shrink-0">
+            <AlertCircle className="h-5 w-5 text-blue-500" />
+          </div>
+          <div className="ml-3">
+            <p className="text-sm text-blue-700">
+              Los asientos contables de períodos cerrados o inactivos se pueden visualizar, 
+              pero no se pueden editar, aprobar o anular para mantener la integridad contable.
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

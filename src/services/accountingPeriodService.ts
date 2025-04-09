@@ -1,6 +1,7 @@
 import { supabase } from '../lib/supabase';
 import { toast } from 'react-toastify';
-import { format, parseISO, startOfMonth, endOfMonth, addMonths } from 'date-fns';
+import { format, parseISO, startOfMonth, endOfMonth, addMonths, lastDayOfMonth } from 'date-fns';
+import { es } from 'date-fns/locale';
 import { FiscalYearType } from '../types/database';
 
 export interface AccountingPeriod {
@@ -278,9 +279,12 @@ export function generateMonthlyPeriods(
   
   // Generar períodos para cada mes en el rango
   while (currentDate <= lastDate) {
-    const periodEndDate = endOfMonth(currentDate);
     const month = currentDate.getMonth() + 1; // 1-12
     const year = currentDate.getFullYear();
+    
+    // Asegurar que el período comienza el primer día del mes y termina el último día
+    const periodStartDate = startOfMonth(currentDate);
+    const periodEndDate = lastDayOfMonth(currentDate);
     
     // Determinar si este mes debe estar activo (solo el mes actual)
     const isActive = month === currentMonth && year === currentYear;
@@ -318,7 +322,7 @@ export function generateMonthlyPeriods(
       name: periodName,
       month,
       year,
-      start_date: format(currentDate, 'yyyy-MM-dd'),
+      start_date: format(periodStartDate, 'yyyy-MM-dd'),
       end_date: format(periodEndDate, 'yyyy-MM-dd'),
       is_closed: false,
       is_active: isActive,
@@ -641,9 +645,12 @@ export async function validateJournalEntryDate(date: string, periodId?: string):
         const endDate = new Date(monthlyPeriod.end_date);
         
         if (entryDate < startDate || entryDate > endDate) {
+          const formattedStartDate = format(startDate, 'dd/MM/yyyy', { locale: es });
+          const formattedEndDate = format(endDate, 'dd/MM/yyyy', { locale: es });
+          
           return {
             valid: false,
-            message: `La fecha del asiento (${new Date(date).toLocaleDateString()}) debe estar dentro del período ${monthlyPeriod.name} (${new Date(monthlyPeriod.start_date).toLocaleDateString()} - ${new Date(monthlyPeriod.end_date).toLocaleDateString()})`
+            message: `La fecha del asiento (${format(new Date(date), 'dd/MM/yyyy', { locale: es })}) debe estar dentro del período ${monthlyPeriod.name} (${formattedStartDate} - ${formattedEndDate})`
           };
         }
         
@@ -671,9 +678,12 @@ export async function validateJournalEntryDate(date: string, periodId?: string):
       }
       
       if (!isDateInPeriod(date, period)) {
+        const formattedStartDate = format(new Date(period.start_date), 'dd/MM/yyyy', { locale: es });
+        const formattedEndDate = format(new Date(period.end_date), 'dd/MM/yyyy', { locale: es });
+        
         return {
           valid: false,
-          message: `La fecha del asiento debe estar dentro del período ${period.name} (${period.start_date} - ${period.end_date})`
+          message: `La fecha del asiento debe estar dentro del período ${period.name} (${formattedStartDate} - ${formattedEndDate})`
         };
       }
       
@@ -819,6 +829,77 @@ export async function createFiscalYear(
   try {
     if (!userId) {
       throw new Error('Usuario no autenticado');
+    }
+
+    // Validar fechas de inicio y fin según el tipo de año fiscal
+    const { start_date, end_date, fiscal_year_type } = formData;
+    const startDate = new Date(start_date);
+    const endDate = new Date(end_date);
+    
+    // Validar que las fechas correspondan al tipo de año fiscal seleccionado
+    let isValid = true;
+    let errorMessage = '';
+    
+    switch (fiscal_year_type) {
+      case 'calendar':
+        // Debe comenzar el 1 de enero y terminar el 31 de diciembre del mismo año
+        if (startDate.getMonth() !== 0 || startDate.getDate() !== 1) {
+          isValid = false;
+          errorMessage = 'El año calendario debe comenzar el 1 de enero';
+        } else if (endDate.getMonth() !== 11 || endDate.getDate() !== 31) {
+          isValid = false;
+          errorMessage = 'El año calendario debe terminar el 31 de diciembre';
+        } else if (startDate.getFullYear() !== endDate.getFullYear()) {
+          isValid = false;
+          errorMessage = 'El año calendario debe tener el mismo año de inicio y fin';
+        }
+        break;
+        
+      case 'fiscal_mar':
+        // Debe comenzar el 1 de abril y terminar el 31 de marzo del año siguiente
+        if (startDate.getMonth() !== 3 || startDate.getDate() !== 1) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe comenzar el 1 de abril';
+        } else if (endDate.getMonth() !== 2 || endDate.getDate() !== 31) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe terminar el 31 de marzo';
+        } else if (endDate.getFullYear() - startDate.getFullYear() !== 1) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe terminar en el año siguiente al de inicio';
+        }
+        break;
+        
+      case 'fiscal_jun':
+        // Debe comenzar el 1 de julio y terminar el 30 de junio del año siguiente
+        if (startDate.getMonth() !== 6 || startDate.getDate() !== 1) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe comenzar el 1 de julio';
+        } else if (endDate.getMonth() !== 5 || endDate.getDate() !== 30) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe terminar el 30 de junio';
+        } else if (endDate.getFullYear() - startDate.getFullYear() !== 1) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe terminar en el año siguiente al de inicio';
+        }
+        break;
+        
+      case 'fiscal_sep':
+        // Debe comenzar el 1 de octubre y terminar el 30 de septiembre del año siguiente
+        if (startDate.getMonth() !== 9 || startDate.getDate() !== 1) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe comenzar el 1 de octubre';
+        } else if (endDate.getMonth() !== 8 || endDate.getDate() !== 30) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe terminar el 30 de septiembre';
+        } else if (endDate.getFullYear() - startDate.getFullYear() !== 1) {
+          isValid = false;
+          errorMessage = 'Este año fiscal debe terminar en el año siguiente al de inicio';
+        }
+        break;
+    }
+    
+    if (!isValid) {
+      throw new Error(errorMessage);
     }
 
     // Crear año fiscal
@@ -1430,70 +1511,108 @@ export async function reopenFiscalYear(
 export async function initializeMonthlyPeriodsForFiscalYear(
   fiscalYearId: string,
   userId: string
-): Promise<{ success: boolean, error?: any }> {
+): Promise<{ success: boolean, error?: any, data?: MonthlyPeriod[] }> {
   try {
-    // Obtener información del año fiscal
-    const { data: fiscalYear, error: fiscalYearError } = await supabase
-      .from('accounting_periods_with_users')
+    // Verificar si el año fiscal existe
+    const { data: fiscalYear, error: yearError } = await supabase
+      .from('accounting_periods')
       .select('*')
       .eq('id', fiscalYearId)
       .single();
       
-    if (fiscalYearError) throw fiscalYearError;
-    if (!fiscalYear) throw new Error('No se encontró el año fiscal');
+    if (yearError) {
+      return { success: false, error: 'No se pudo encontrar el año fiscal' };
+    }
     
-    // Verificar si ya existen períodos
+    if (!fiscalYear) {
+      return { success: false, error: 'El año fiscal no existe' };
+    }
+    
+    // Verificar que sea un año fiscal (no un período mensual)
+    if (fiscalYear.is_month) {
+      return { success: false, error: 'El ID proporcionado no corresponde a un año fiscal' };
+    }
+    
+    // Verificar que no tenga ya períodos mensuales creados
     const { data: existingPeriods, error: existingError } = await supabase
-      .from('monthly_accounting_periods_with_users')
-      .select('id')
+      .from('monthly_accounting_periods')
+      .select('count')
       .eq('fiscal_year_id', fiscalYearId);
       
-    if (existingError) throw existingError;
-    
-    // Si existen períodos, eliminarlos para regenerarlos
-    if (existingPeriods && existingPeriods.length > 0) {
-      const { error: deleteError } = await supabase
-        .from('monthly_accounting_periods')
-        .delete()
-        .in('id', existingPeriods.map(p => p.id));
-        
-      if (deleteError) throw deleteError;
-      
-      console.log(`Eliminados ${existingPeriods.length} períodos mensuales existentes`);
+    if (existingError) {
+      return { success: false, error: 'No se pudo verificar si ya existen períodos mensuales' };
     }
     
-    // Generar períodos mensuales utilizando la función mejorada
-    const monthlyPeriods = generateMonthlyPeriods(
-      fiscalYearId, 
-      fiscalYear.start_date, 
-      fiscalYear.end_date,
-      fiscalYear.fiscal_year_type
-    );
+    if (existingPeriods && existingPeriods.length > 0 && existingPeriods[0].count > 0) {
+      return { success: false, error: 'Este año fiscal ya tiene períodos mensuales creados' };
+    }
     
-    // Preparar datos para inserción
-    const periodsToInsert = monthlyPeriods.map(period => ({
-      ...period,
-      created_by: userId,
-      created_at: new Date().toISOString()
-    }));
+    // Obtener las fechas de inicio y fin
+    const startDate = new Date(fiscalYear.start_date);
+    const endDate = new Date(fiscalYear.end_date);
+    
+    // Crear un array para almacenar los períodos mensuales
+    const monthlyPeriods: MonthlyPeriod[] = [];
+    
+    // Inicializar fecha actual como la fecha de inicio
+    let currentDate = startOfMonth(startDate);
+    let monthNumber = 1; // Contador para el número de mes dentro del año fiscal
+    
+    // Mientras la fecha actual sea menor o igual a la fecha de fin del año fiscal
+    while (currentDate <= endDate) {
+      const periodStartDate = new Date(currentDate);
+      const periodEndDate = endOfMonth(currentDate);
+      
+      // Si el fin del mes excede la fecha de fin del año fiscal, usar la fecha de fin del año fiscal
+      const adjustedEndDate = periodEndDate > endDate ? endDate : periodEndDate;
+      
+      // El mes y año calendario
+      const calendarMonth = periodStartDate.getMonth() + 1; // 1-12
+      const calendarYear = periodStartDate.getFullYear();
+      
+      // Crear el nombre del período mensual "Enero 2023 (1° mes)"
+      const monthName = format(periodStartDate, 'MMMM yyyy', { locale: es });
+      const capitalizedMonthName = monthName.charAt(0).toUpperCase() + monthName.slice(1);
+      const periodName = `${capitalizedMonthName} (${monthNumber}° mes)`;
+      
+      // Crear la entrada del período mensual
+      monthlyPeriods.push({
+        fiscal_year_id: fiscalYearId,
+        month: calendarMonth,
+        year: calendarYear,
+        name: periodName,
+        start_date: periodStartDate.toISOString(),
+        end_date: adjustedEndDate.toISOString(),
+        is_closed: false,
+        is_active: fiscalYear.is_active, // Heredar el estado activo del año fiscal
+        created_by: userId
+      });
+      
+      // Incrementar el contador de mes
+      monthNumber++;
+      
+      // Avanzar al siguiente mes
+      currentDate = addMonths(currentDate, 1);
+    }
     
     // Insertar los períodos mensuales en la base de datos
-    if (periodsToInsert.length > 0) {
-      const { error } = await supabase
+    if (monthlyPeriods.length > 0) {
+      const { data: insertedPeriods, error: insertError } = await supabase
         .from('monthly_accounting_periods')
-        .insert(periodsToInsert);
+        .insert(monthlyPeriods)
+        .select();
         
-      if (error) throw error;
+      if (insertError) {
+        return { success: false, error: `Error al crear los períodos mensuales: ${insertError.message}` };
+      }
       
-      console.log(`Creados ${periodsToInsert.length} períodos mensuales para el año fiscal ${fiscalYear.name}`);
-      const activePeriod = periodsToInsert.find(p => p.is_active);
-      console.log(`Período activo: ${activePeriod?.name || 'Ninguno'}`);
+      // Devolver éxito y los períodos creados
+      return { success: true, data: insertedPeriods };
     }
     
-    return { success: true };
+    return { success: true, data: [] };
   } catch (error: any) {
-    console.error('Error al inicializar períodos mensuales:', error);
-    return { success: false, error: error.message || 'Error al inicializar períodos mensuales' };
+    return { success: false, error: `Error inesperado: ${error.message}` };
   }
 }
 

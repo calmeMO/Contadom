@@ -5,6 +5,7 @@ import { Building2, Lock, Mail } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { toast } from 'react-toastify';
 import { supabase } from '../lib/supabase';
+import CustomAlert from '../components/ui/CustomAlert';
 
 export function Login() {
   const navigate = useNavigate();
@@ -14,41 +15,117 @@ export function Login() {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [isResetMode, setIsResetMode] = useState(false);
+  const [showSupportModal, setShowSupportModal] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
 
   const from = location.state?.from?.pathname || '/dashboard';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setErrorMessage('');
 
     try {
       if (isResetMode) {
-        const { error } = await supabase.auth.resetPasswordForEmail(email, {
-          redirectTo: `${window.location.origin}/reset-password`,
-        });
-        if (error) throw error;
-        toast.success(
-          'Se ha enviado un enlace de recuperación a tu correo electrónico'
+        toast.info(
+          'Para recuperar su contraseña, contacte al equipo de soporte técnico',
+          { autoClose: false }
         );
         setIsResetMode(false);
       } else {
+        // Verificar primero si el usuario está activo
+        try {
+          const { data } = await supabase
+            .from('user_profiles')
+            .select('is_active, account_status')
+            .eq('email', email.toLowerCase())
+            .single();
+          
+          if (data) {
+            if (data.is_active === false) {
+              setErrorMessage('Su cuenta está inactiva. Por favor, contacte a soporte.');
+              toast.error('Su cuenta está inactiva. Por favor, contacte a soporte.');
+              setLoading(false);
+              return;
+            }
+            
+            if (data.account_status === 'inactive' || 
+                data.account_status === 'suspended' ||
+                data.account_status === 'archived') {
+              setErrorMessage(`Su cuenta está ${data.account_status}. Por favor, contacte a soporte.`);
+              toast.error(`Su cuenta está ${data.account_status}. Por favor, contacte a soporte.`);
+              setLoading(false);
+              return;
+            }
+          }
+        } catch (profileError) {
+          // Si no podemos verificar el perfil, continuamos con la autenticación normal
+          console.warn('No se pudo verificar el estado del perfil:', profileError);
+        }
+        
         await signIn(email, password);
         navigate(from, { replace: true });
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error en autenticación:', error);
-      toast.error(
-        isResetMode
-          ? 'Error al enviar el correo de recuperación'
-          : 'Error al iniciar sesión. Por favor, verifica tus credenciales.'
-      );
+      
+      // Manejar mensajes de error específicos
+      let mensajeError = 'Error al iniciar sesión';
+      
+      if (error.message) {
+        switch (error.message) {
+          case 'cuenta_inactiva':
+            mensajeError = 'Su cuenta está inactiva. Por favor, contacte a soporte.';
+            break;
+          case 'cuenta_suspendida':
+            mensajeError = 'Su cuenta está suspendida. Por favor, contacte a soporte.';
+            break;
+          case 'cuenta_archivada':
+            mensajeError = 'Su cuenta ha sido archivada. Por favor, contacte a soporte.';
+            break;
+          case 'credenciales_invalidas':
+            mensajeError = 'Correo electrónico o contraseña incorrectos.';
+            break;
+          default:
+            // Verificar si es error de bloqueo temporal
+            if (error.message.startsWith('cuenta_bloqueada:')) {
+              const minutos = error.message.split(':')[1];
+              mensajeError = `Cuenta bloqueada temporalmente. Intente nuevamente en ${minutos} minutos.`;
+            } else if (error.message.includes('Database error granting user')) {
+              // Error específico que ocurre cuando hay problemas de permisos en la BD
+              mensajeError = 'Usuario inactivo, contacte al departamento de administración';
+            } else {
+              mensajeError = 'Error al iniciar sesión. Por favor, verifique sus credenciales.';
+            }
+        }
+      }
+      
+      setErrorMessage(mensajeError);
+      toast.error(mensajeError);
     } finally {
       setLoading(false);
     }
   };
 
+  const handleForgotPassword = () => {
+    setShowSupportModal(true);
+  };
+
+  const handleCloseSupportModal = () => {
+    setShowSupportModal(false);
+  };
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-500 to-blue-700 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
+      {showSupportModal && (
+        <CustomAlert
+          title="¿Olvidaste tu contraseña?"
+          message="Por favor, contacta a nuestro equipo de soporte para restablecer tu contraseña."
+          confirmText="Entendido"
+          onConfirm={handleCloseSupportModal}
+          onCancel={handleCloseSupportModal}
+        />
+      )}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -76,7 +153,7 @@ export function Login() {
             <div>
               <label
                 htmlFor="email"
-                className="block text-sm font-medium text-gray-700"
+                className="block mb-2 text-sm font-medium text-gray-700"
               >
                 Correo electrónico
               </label>
@@ -102,7 +179,7 @@ export function Login() {
               <div>
                 <label
                   htmlFor="password"
-                  className="block text-sm font-medium text-gray-700"
+                  className="block mb-2 text-sm font-medium text-gray-700"
                 >
                   Contraseña
                 </label>
@@ -124,6 +201,12 @@ export function Login() {
               </div>
             )}
 
+            {errorMessage && (
+              <div className="text-sm text-red-600 font-medium p-2 bg-red-50 rounded border border-red-200">
+                {errorMessage}
+              </div>
+            )}
+
             <div>
               <motion.button
                 whileHover={{ scale: 1.01 }}
@@ -135,7 +218,7 @@ export function Login() {
                 {loading
                   ? 'Procesando...'
                   : isResetMode
-                  ? 'Enviar correo de recuperación'
+                  ? 'Contactar a soporte'
                   : 'Iniciar sesión'}
               </motion.button>
             </div>
@@ -143,12 +226,11 @@ export function Login() {
 
           <div className="mt-6">
             <button
-              onClick={() => setIsResetMode(!isResetMode)}
-              className="w-full text-center text-sm text-blue-600 hover:text-blue-500"
+              type="button"
+              className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300"
+              onClick={handleForgotPassword}
             >
-              {isResetMode
-                ? '¿Ya tienes una cuenta? Inicia sesión'
-                : '¿Olvidaste tu contraseña?'}
+              ¿Olvidaste tu contraseña?
             </button>
           </div>
         </div>

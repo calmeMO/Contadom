@@ -83,12 +83,15 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const signIn = async (email: string, password: string) => {
     setAuthState((prev) => ({ ...prev, loading: true }));
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+      // Usar nuestra función personalizada que verifica el estado de la cuenta
+      // en lugar de llamar directamente a supabase.auth.signInWithPassword
+      const authData = await import('../lib/auth').then(module => 
+        module.signInWithEmailPassword(email, password)
+      );
 
-      if (error) throw error;
+      if (!authData || !authData.user) {
+        throw new Error('Error al iniciar sesión: no se pudo autenticar');
+      }
 
       // El estado se actualizará automáticamente a través del listener onAuthStateChange
     } catch (error: any) {

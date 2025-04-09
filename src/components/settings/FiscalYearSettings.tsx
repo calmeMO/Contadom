@@ -15,7 +15,8 @@ import {
   Eye,
   EyeOff,
   RefreshCw,
-  ChevronUp
+  ChevronUp,
+  LifeBuoy
 } from 'lucide-react';
 import { 
   MonthlyPeriod,
@@ -23,7 +24,6 @@ import {
   createFiscalYear,
   fetchFiscalYears,
   closeFiscalYear,
-  reopenFiscalYear,
   toggleFiscalYearActive,
   closeMonthlyPeriod,
   toggleMonthlyPeriodActive,
@@ -32,14 +32,22 @@ import {
 import Modal from '../ui/Modal';
 import Decimal from 'decimal.js';
 import { FiscalYearType } from '../../types/database';
+import { formatSafeDate } from '../../utils/formatters';
 
 // Función para formatear fechas en formato español textual (1 de enero de 2023)
 const formatDateSpanish = (dateString: string): string => {
   if (!dateString) return '';
   
-  const date = new Date(dateString);
-  const day = date.getDate();
-  const year = date.getFullYear();
+  // Crear la fecha y ajustar la zona horaria
+  // Parseamos la fecha asegurándonos que se interpreta como UTC
+  const dateParts = dateString.split('T')[0].split('-');
+  if (dateParts.length !== 3) return '';
+  
+  const year = parseInt(dateParts[0]);
+  const month = parseInt(dateParts[1]) - 1; // Meses en JS son 0-11
+  const day = parseInt(dateParts[2]);
+  
+  const date = new Date(year, month, day);
   
   // Array de nombres de meses en español
   const monthNames = [
@@ -47,10 +55,8 @@ const formatDateSpanish = (dateString: string): string => {
     'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'
   ];
   
-  const month = monthNames[date.getMonth()];
-  
   // Formato: "1 de enero de 2023"
-  return `${day} de ${month} de ${year}`;
+  return `${date.getDate()} de ${monthNames[date.getMonth()]} de ${date.getFullYear()}`;
 };
 
 // Agregar interfaz para extender MonthlyPeriod con fiscal_year
@@ -95,12 +101,9 @@ export function FiscalYearSettings() {
     fiscal_year_type: 'calendar'
   });
 
-  // Modal para reapertura de año fiscal
-  const [showReopenModal, setShowReopenModal] = useState(false);
-  const [reopenReason, setReopenReason] = useState('');
-  const [selectedYearId, setSelectedYearId] = useState<string | null>(null);
-  const [selectedYearForReopen, setSelectedYearForReopen] = useState<LocalFiscalYear | null>(null);
-
+  // Modal para soporte
+  const [showSupportModal, setShowSupportModal] = useState(false);
+  
   // Estadísticas de períodos
   const [periodStats, setPeriodStats] = useState<Record<string, { count: number, balance: Decimal }>>({});
   
@@ -323,11 +326,46 @@ export function FiscalYearSettings() {
     try {
       setLoading(true);
       
+      // Obtener los datos del año fiscal para trabajar con las fechas
+      const { data: fiscalYear, error: yearError } = await supabase
+        .from('accounting_periods')
+        .select('*')
+        .eq('id', fiscalYearId)
+        .single();
+        
+      if (yearError || !fiscalYear) {
+        throw new Error('No se pudo obtener la información del año fiscal');
+      }
+      
+      // Imprimir información de depuración
+      console.log('Inicializando períodos mensuales para:', {
+        id: fiscalYearId,
+        nombre: fiscalYear.name,
+        inicio: fiscalYear.start_date,
+        fin: fiscalYear.end_date,
+        tipo: fiscalYear.fiscal_year_type
+      });
+      
       // Llamar al servicio para inicializar períodos mensuales
-      const { success, error } = await initializeMonthlyPeriodsForFiscalYear(fiscalYearId, user.id);
+      const { success, error, data: createdPeriods } = await initializeMonthlyPeriodsForFiscalYear(fiscalYearId, user.id);
       
       if (!success) {
         throw new Error(error);
+      }
+      
+      // Registrar los períodos creados para depuración
+      if (createdPeriods && createdPeriods.length > 0) {
+        console.log(`Se crearon ${createdPeriods.length} períodos mensuales`);
+        console.log('Primer período:', {
+          nombre: createdPeriods[0].name,
+          inicio: createdPeriods[0].start_date,
+          fin: createdPeriods[0].end_date
+        });
+        console.log('Último período:', {
+          nombre: createdPeriods[createdPeriods.length - 1].name,
+          inicio: createdPeriods[createdPeriods.length - 1].start_date,
+          fin: createdPeriods[createdPeriods.length - 1].end_date
+        });
       }
       
       // Refrescar datos para mostrar los nuevos períodos
@@ -425,93 +463,67 @@ export function FiscalYearSettings() {
     }
   };
 
-  const handleReopenYearClick = (year: LocalFiscalYear) => {
-    if (year.id) {
-      setSelectedYearId(year.id);
-      setReopenReason('');
-      setShowReopenModal(true);
-    }
-  };
-  
-  const handleReopenYear = async () => {
-    if (!user?.id || !selectedYearForReopen || !selectedYearForReopen.id || !reopenReason.trim()) {
-      toast.error('Debes iniciar sesión y proporcionar un motivo para reabrir el año fiscal');
-      return;
-    }
-    
-    try {
-      setProcessingYearId(selectedYearForReopen.id);
-      
-      // Reabrir año fiscal
-      const { success, error } = await reopenFiscalYear(selectedYearForReopen.id, user.id, reopenReason);
-      
-      if (!success) {
-        throw new Error(error || 'Error al reabrir el año fiscal');
-      }
-      
-      toast.success('Año fiscal reabierto correctamente junto con sus períodos mensuales');
-      
-      // Cerrar modal y refrescar datos
-      setShowReopenModal(false);
-      setSelectedYearForReopen(null);
-      fetchData();
-      
-    } catch (error: any) {
-      console.error('Error al reabrir año fiscal:', error);
-      toast.error(`Error: ${error.message || 'No se pudo reabrir el año fiscal'}`);
-    } finally {
-      setProcessingYearId(null);
-    }
-  };
-
   const handleCreateFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
     
+    // Si cambia el tipo de año fiscal, actualizar automáticamente las fechas y el nombre
     if (name === 'fiscal_year_type') {
-      // Al cambiar el tipo de año fiscal, ajustar fechas automáticamente
       const currentYear = new Date().getFullYear();
-      let startDate = '';
-      let endDate = '';
-      let yearName = '';
+      let startDate, endDate, periodName = '';
       
-      // Configurar fechas según el tipo de año fiscal
+      // Crear fechas sin dependencia de zona horaria
+      const createLocalDate = (year: number, month: number, day: number) => {
+        // Formatea la fecha en formato ISO pero con fecha local, sin componente de hora
+        return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      };
+      
       switch (value) {
         case 'calendar':
-          // Año calendario: 1 enero - 31 diciembre
-          startDate = `${currentYear}-01-01`;
-          endDate = `${currentYear}-12-31`;
-          yearName = `Año Calendario ${currentYear}`;
+          // Año calendario: 1 de enero al 31 de diciembre
+          startDate = createLocalDate(currentYear, 0, 1);
+          endDate = createLocalDate(currentYear, 11, 31);
+          periodName = `Año Calendario ${currentYear}`;
           break;
         case 'fiscal_mar':
-          // Año fiscal abril-marzo: 1 abril - 31 marzo del siguiente año
-          startDate = `${currentYear}-04-01`;
-          endDate = `${currentYear + 1}-03-31`;
-          yearName = `Año Fiscal Abr ${currentYear} - Mar ${currentYear + 1}`;
+          // Año fiscal abril-marzo: 1 de abril al 31 de marzo del siguiente año
+          startDate = createLocalDate(currentYear, 3, 1);
+          endDate = createLocalDate(currentYear + 1, 2, 31);
+          periodName = `Año Fiscal Abr ${currentYear} - Mar ${currentYear + 1}`;
           break;
         case 'fiscal_jun':
-          // Año fiscal julio-junio: 1 julio - 30 junio del siguiente año
-          startDate = `${currentYear}-07-01`;
-          endDate = `${currentYear + 1}-06-30`;
-          yearName = `Año Fiscal Jul ${currentYear} - Jun ${currentYear + 1}`;
+          // Año fiscal julio-junio: 1 de julio al 30 de junio del siguiente año
+          startDate = createLocalDate(currentYear, 6, 1);
+          endDate = createLocalDate(currentYear + 1, 5, 30);
+          periodName = `Año Fiscal Jul ${currentYear} - Jun ${currentYear + 1}`;
           break;
         case 'fiscal_sep':
-          // Año fiscal octubre-septiembre: 1 octubre - 30 septiembre del siguiente año
-          startDate = `${currentYear}-10-01`;
-          endDate = `${currentYear + 1}-09-30`;
-          yearName = `Año Fiscal Oct ${currentYear} - Sep ${currentYear + 1}`;
+          // Año fiscal octubre-septiembre: 1 de octubre al 30 de septiembre del siguiente año
+          startDate = createLocalDate(currentYear, 9, 1);
+          endDate = createLocalDate(currentYear + 1, 8, 30);
+          periodName = `Año Fiscal Oct ${currentYear} - Sep ${currentYear + 1}`;
           break;
+        default:
+          // Valor por defecto: año calendario
+          startDate = createLocalDate(currentYear, 0, 1);
+          endDate = createLocalDate(currentYear, 11, 31);
+          periodName = `Año Calendario ${currentYear}`;
       }
       
-      // Actualizar formulario con fechas y tipo
+      console.log('Fechas generadas:', {
+        tipo: value,
+        nombre: periodName,
+        inicio: startDate,
+        fin: endDate
+      });
+      
       setFormData({
         ...formData,
-        fiscal_year_type: value as FiscalYearType,
+        [name]: value as FiscalYearType,
+        name: periodName,
         start_date: startDate,
-        end_date: endDate,
-        name: yearName
+        end_date: endDate
       });
     } else {
-      // Para otros campos, actualizar normalmente
       setFormData({
         ...formData,
         [name]: value
@@ -533,10 +545,17 @@ export function FiscalYearSettings() {
       // Si existe un tipo de año fiscal configurado en la empresa, usar ese
       const effectiveFiscalYearType = companyFiscalYearType || formData.fiscal_year_type;
       
+      console.log('Formulario a enviar:', {
+        nombre: formData.name,
+        inicio: formData.start_date,
+        fin: formData.end_date,
+        tipo: effectiveFiscalYearType
+      });
+      
       // Verificar si ya existe un año fiscal con estas fechas o con fechas solapadas
       const { data: existingYears, error: checkError } = await supabase
         .from('accounting_periods')
-        .select('id, name, start_date, end_date')
+        .select('id, name, start_date, end_date, is_month')
         .eq('is_month', false)
         .or(`start_date.lte.${formData.end_date},end_date.gte.${formData.start_date}`);
       
@@ -547,6 +566,8 @@ export function FiscalYearSettings() {
       // Verificar si hay solapamiento de fechas
       if (existingYears && existingYears.length > 0) {
         const overlappingYear = existingYears.find(year => {
+          if (year.is_month) return false; // Ignorar períodos mensuales
+          
           const yearStart = new Date(year.start_date);
           const yearEnd = new Date(year.end_date);
           const formStart = new Date(formData.start_date);
@@ -561,41 +582,7 @@ export function FiscalYearSettings() {
         
         if (overlappingYear) {
           toast.warning(`El período solicitado se solapa con "${overlappingYear.name}" (${formatDateSpanish(overlappingYear.start_date)} - ${formatDateSpanish(overlappingYear.end_date)})`);
-          return;
-        }
-      }
-      
-      // Verificar que sea el período siguiente y no haya huecos
-      if (fiscalYears.length > 0) {
-        const sortedYears = [...fiscalYears].sort((a, b) => 
-          new Date(b.end_date).getTime() - new Date(a.end_date).getTime()
-        );
-        
-        const lastFiscalYear = sortedYears[0];
-        const lastEndDate = new Date(lastFiscalYear.end_date);
-        const newStartDate = new Date(formData.start_date);
-        
-        // Calcular la diferencia en días
-        const diffTime = Math.abs(newStartDate.getTime() - lastEndDate.getTime());
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
-        
-        // Si la diferencia es mayor a 1 día, hay un hueco
-        if (diffDays > 1) {
-          const confirmGap = window.confirm(
-            `Hay un intervalo de ${diffDays - 1} días entre el último período fiscal y el nuevo. ` +
-            `El último período termina el ${formatDateSpanish(lastFiscalYear.end_date)} y el nuevo comienza el ${formatDateSpanish(formData.start_date)}. ` +
-            `¿Desea continuar de todos modos?`
-          );
-          
-          if (!confirmGap) {
-            setLoading(false);
-            return;
-          }
-        }
-        
-        // Si la nueva fecha de inicio es anterior al fin del último período, es inválido
-        if (newStartDate <= lastEndDate) {
-          toast.error(`La fecha de inicio debe ser posterior al último período fiscal (${formatDateSpanish(lastFiscalYear.end_date)})`);
+          setLoading(false);
           return;
         }
       }
@@ -701,35 +688,28 @@ export function FiscalYearSettings() {
       // Calcular el siguiente año fiscal basado en el último
       if (lastFiscalYear) {
         const lastEndDate = new Date(lastFiscalYear.end_date);
-        startDate = new Date(lastEndDate);
-        startDate.setDate(startDate.getDate() + 1); // Día siguiente al último día del año fiscal anterior
-        
-        const startYear = startDate.getFullYear();
+        const nextStartYear = lastEndDate.getFullYear() + (fiscalYearType === 'calendar' ? 1 : 0);
         
         // Determinar el inicio y fin basado en el tipo de año fiscal
         switch (fiscalYearType) {
           case 'calendar': // Enero a Diciembre
-            // Ajustar al 1 de enero del año correspondiente
-            startDate = new Date(startYear, 0, 1); // 1 de Enero
-            endDate = new Date(startYear, 11, 31); // 31 de Diciembre
+            startDate = new Date(nextStartYear, 0, 1); // 1 de Enero
+            endDate = new Date(nextStartYear, 11, 31); // 31 de Diciembre
             break;
             
           case 'fiscal_mar': // Abril a Marzo
-            // Ajustar al 1 de abril
-            startDate = new Date(startYear, 3, 1); // 1 de Abril
-            endDate = new Date(startYear + 1, 2, 31); // 31 de Marzo del año siguiente
+            startDate = new Date(nextStartYear, 3, 1); // 1 de Abril
+            endDate = new Date(nextStartYear + 1, 2, 31); // 31 de Marzo del año siguiente
             break;
             
           case 'fiscal_jun': // Julio a Junio
-            // Ajustar al 1 de julio
-            startDate = new Date(startYear, 6, 1); // 1 de Julio
-            endDate = new Date(startYear + 1, 5, 30); // 30 de Junio del año siguiente
+            startDate = new Date(nextStartYear, 6, 1); // 1 de Julio
+            endDate = new Date(nextStartYear + 1, 5, 30); // 30 de Junio del año siguiente
             break;
             
           case 'fiscal_sep': // Octubre a Septiembre
-            // Ajustar al 1 de octubre
-            startDate = new Date(startYear, 9, 1); // 1 de Octubre
-            endDate = new Date(startYear + 1, 8, 30); // 30 de Septiembre del año siguiente
+            startDate = new Date(nextStartYear, 9, 1); // 1 de Octubre
+            endDate = new Date(nextStartYear + 1, 8, 30); // 30 de Septiembre del año siguiente
             break;
         }
       }
@@ -769,7 +749,7 @@ export function FiscalYearSettings() {
     
     switch (fiscalYearType) {
       case 'calendar':
-        yearName = `Año Fiscal ${startYear}`;
+        yearName = `Año Calendario ${startYear}`;
         break;
       case 'fiscal_mar':
         yearName = `Año Fiscal Abr ${startYear} - Mar ${endYear}`;
@@ -803,84 +783,110 @@ export function FiscalYearSettings() {
     }
     
     return (
-      <div className="grid gap-2">
-        {periods.map(period => (
-          <div 
-            key={period.id}
-            className={`p-3 rounded-lg border ${
-              period.is_active 
-                ? 'border-green-500 bg-green-50' 
-                : 'border-gray-300'
-            } ${
-              period.is_closed 
-                ? 'opacity-70 bg-gray-100' 
-                : ''
-            }`}
-          >
-            <div className="flex justify-between items-center">
-              <div>
-                <h4 className="font-medium">{period.name}</h4>
-                <p className="text-sm text-gray-500">
-                  {formatDateSpanish(period.start_date)} - {formatDateSpanish(period.end_date)}
-                </p>
-                <p className="text-xs text-gray-500 mt-1">
-                  {period.id && periodStats[period.id] 
-                    ? `${periodStats[period.id].count} asientos contables` 
-                    : '0 asientos contables'}
-                </p>
-              </div>
-              <div className="flex flex-col space-y-2">
-                <div className="flex space-x-2">
+      <div className="overflow-x-auto w-full">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Período
+              </th>
+              <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Fechas
+              </th>
+              <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Asientos
+              </th>
+              <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Estado
+              </th>
+              <th scope="col" className="px-3 py-2 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Acciones
+              </th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {periods.map(period => (
+              <tr key={period.id} className={`${
+                period.is_active 
+                  ? 'bg-green-50' 
+                  : ''
+              } ${
+                period.is_closed 
+                  ? 'bg-gray-100' 
+                  : ''
+              } hover:bg-gray-50 transition-colors`}>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <div className="text-sm font-medium text-gray-900">{period.name}</div>
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <div className="text-sm text-gray-500">
+                    {formatDateSpanish(period.start_date)} - {formatDateSpanish(period.end_date)}
+                  </div>
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <div className="text-sm text-gray-500">
+                    {period.id && periodStats[period.id] 
+                      ? `${periodStats[period.id].count}` 
+                      : '0'}
+                  </div>
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
                   {period.is_closed ? (
-                    <span className="px-2 py-1 bg-gray-200 text-gray-700 text-xs rounded-full">
+                    <span className="px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-200 text-gray-800">
                       Cerrado
                     </span>
                   ) : (
-                    <span className={`px-2 py-1 ${period.is_active ? 'bg-green-200 text-green-800' : 'bg-gray-200 text-gray-700'} text-xs rounded-full`}>
+                    <span className={`px-2 py-1 inline-flex text-xs leading-5 font-semibold rounded-full ${
+                      period.is_active 
+                        ? 'bg-green-100 text-green-800' 
+                        : 'bg-gray-100 text-gray-800'
+                    }`}>
                       {period.is_active ? 'Activo' : 'Inactivo'}
                     </span>
                   )}
-                </div>
-                
-                {/* Mostrar botones solo cuando el período no está cerrado */}
-                {!period.is_closed && (
-                  <div className="flex space-x-2">
-                    {!fiscalYear?.is_active ? (
-                      <span className="text-xs text-gray-500 italic">El año fiscal está inactivo</span>
-                    ) : (
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap text-right text-sm font-medium">
+                  <div className="flex justify-end space-x-2">
+                    {!period.is_closed && !fiscalYear?.is_closed && (
                       <>
-                        {period.is_active ? (
-                          <button
-                            onClick={() => handleTogglePeriodActive(period, false)}
-                            disabled={processingPeriodId === period.id}
-                            className="text-xs text-yellow-600 hover:text-yellow-800"
-                          >
-                            Desactivar
-                          </button>
+                        {!fiscalYear?.is_active ? (
+                          <span className="text-xs text-gray-500 italic">Año inactivo</span>
                         ) : (
-                          <button
-                            onClick={() => handleTogglePeriodActive(period, true)}
-                            disabled={processingPeriodId === period.id}
-                            className="text-xs text-green-600 hover:text-green-800"
-                          >
-                            Activar
-                          </button>
+                          <>
+                            {period.is_active ? (
+                              <button
+                                onClick={() => handleTogglePeriodActive(period, false)}
+                                disabled={processingPeriodId === period.id}
+                                className="text-yellow-600 hover:text-yellow-900 ml-2 px-2 py-1 text-xs rounded hover:bg-yellow-50 transition-colors"
+                              >
+                                Desactivar
+                              </button>
+                            ) : (
+                              <button
+                                onClick={() => handleTogglePeriodActive(period, true)}
+                                disabled={processingPeriodId === period.id}
+                                className="text-green-600 hover:text-green-900 ml-2 px-2 py-1 text-xs rounded hover:bg-green-50 transition-colors"
+                              >
+                                Activar
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleClosePeriod(period)}
+                              disabled={processingPeriodId === period.id}
+                              className="text-red-600 hover:text-red-900 ml-2 px-2 py-1 text-xs rounded hover:bg-red-50 transition-colors"
+                            >
+                              Cerrar
+                            </button>
+                          </>
                         )}
-                        <button
-                          onClick={() => handleClosePeriod(period)}
-                          disabled={processingPeriodId === period.id}
-                          className="text-xs text-red-600 hover:text-red-800"
-                        >
-                          Cerrar
-                        </button>
                       </>
                     )}
                   </div>
-                )}
-              </div>
-            </div>
-          </div>
-        ))}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     );
   };
@@ -897,9 +903,16 @@ export function FiscalYearSettings() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center flex-wrap gap-2">
         <h2 className="text-xl font-semibold text-gray-900">Gestión de Años Fiscales y Períodos</h2>
-        <div>
+        <div className="flex space-x-2">
+          <button
+            onClick={() => setShowSupportModal(true)}
+            className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            <LifeBuoy className="mr-1 h-4 w-4" />
+            Soporte
+          </button>
           <button
             onClick={() => {
               initializeFormData();
@@ -910,6 +923,21 @@ export function FiscalYearSettings() {
             <Plus className="mr-1 h-4 w-4" />
             Nuevo Año Fiscal
           </button>
+        </div>
+      </div>
+
+      {/* Mensaje informativo sobre períodos cerrados */}
+      <div className="bg-blue-50 border-l-4 border-blue-400 p-4 mb-6 rounded-md">
+        <div className="flex">
+          <div className="flex-shrink-0">
+            <AlertCircle className="h-5 w-5 text-blue-400" />
+          </div>
+          <div className="ml-3">
+            <p className="text-sm text-blue-700">
+              Los años fiscales y períodos mensuales que han sido cerrados no pueden reabrirse por motivos 
+              de integridad contable. Para situaciones excepcionales, contacte con el equipo de soporte.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -935,117 +963,138 @@ export function FiscalYearSettings() {
           </div>
         </div>
       ) : (
-        <div className="space-y-4">
-          {fiscalYears.map(year => (
-            <div key={year.id} className="bg-white shadow rounded-lg overflow-hidden">
-              <div 
-                className={`px-4 py-3 flex justify-between items-center cursor-pointer ${
-                  year.is_closed 
-                    ? 'bg-gray-100' 
-                    : year.is_active 
-                      ? 'bg-green-50 border-l-4 border-green-500' 
-                      : 'bg-gray-50'
-                }`}
-                onClick={() => toggleYearExpansion(year.id)}
-              >
-                <div className="flex items-center space-x-2">
-                  <Calendar className="h-5 w-5 text-gray-500" />
-                  <div>
-                    <h3 className="font-medium">{year.name}</h3>
-                    <p className="text-sm text-gray-500">
-                      {formatDateSpanish(year.start_date)} - {formatDateSpanish(year.end_date)}
-                    </p>
-                  </div>
-                </div>
-                
-                <div className="flex items-center space-x-2">
-                  {year.is_closed ? (
-                    <span className="px-2 py-1 bg-gray-200 text-gray-700 text-xs rounded-full">
-                      Cerrado
-                    </span>
-                  ) : (
-                    <span className={`px-2 py-1 ${year.is_active ? 'bg-green-200 text-green-800' : 'bg-gray-200 text-gray-700'} text-xs rounded-full`}>
-                      {year.is_active ? 'Activo' : 'Inactivo'}
-                    </span>
-                  )}
-                  
-                  {expandedYears.includes(year.id) ? (
-                    <ChevronUp className="h-5 w-5 text-gray-500" />
-                  ) : (
-                    <ChevronDown className="h-5 w-5 text-gray-500" />
-                  )}
-                </div>
-              </div>
-              
-              {expandedYears.includes(year.id) && (
-                <div className="p-4 shadow rounded-lg bg-white border border-gray-200">
-                  <div className="mb-4">
-                    <div className="flex flex-wrap gap-2 mb-4">
-                      {!year.is_closed && (
-                        <button
-                          onClick={() => {
-                            if (window.confirm(`¿Estás seguro de ${year.is_active ? 'desactivar' : 'activar'} el año fiscal ${year.name}?`)) {
-                              handleToggleYearActive(year, !year.is_active);
-                            }
-                          }}
-                          disabled={processingYearId === year.id}
-                          className={`px-4 py-2 text-sm font-medium rounded-md text-white ${
-                            year.is_active 
-                              ? 'bg-yellow-500 hover:bg-yellow-700' 
-                              : 'bg-green-500 hover:bg-green-700'
-                          } disabled:opacity-50`}
+        <div className="overflow-x-auto">
+          <div className="inline-block min-w-full align-middle">
+            <div className="overflow-hidden shadow ring-1 ring-black ring-opacity-5 md:rounded-lg">
+              <table className="min-w-full divide-y divide-gray-300">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th scope="col" className="py-3.5 pl-4 pr-3 text-left text-sm font-semibold text-gray-900 sm:pl-6">
+                      Año Fiscal
+                    </th>
+                    <th scope="col" className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                      Fechas
+                    </th>
+                    <th scope="col" className="px-3 py-3.5 text-left text-sm font-semibold text-gray-900">
+                      Estado
+                    </th>
+                    <th scope="col" className="px-3 py-3.5 text-right text-sm font-semibold text-gray-900">
+                      Acciones
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-200 bg-white">
+                  {fiscalYears.map(year => (
+                    <React.Fragment key={year.id}>
+                      <tr className={`${
+                        year.is_closed 
+                          ? 'bg-gray-50' 
+                          : year.is_active 
+                            ? 'bg-green-50' 
+                            : ''
+                      }`}>
+                        <td 
+                          className="whitespace-nowrap py-4 pl-4 pr-3 text-sm font-medium text-gray-900 sm:pl-6 cursor-pointer"
+                          onClick={() => toggleYearExpansion(year.id)}
                         >
-                          {year.is_active ? 'Desactivar' : 'Activar'}
-                        </button>
-                      )}
+                          <div className="flex items-center">
+                            {expandedYears.includes(year.id) ? (
+                              <ChevronDown className="h-5 w-5 text-gray-500 mr-2" />
+                            ) : (
+                              <ChevronRight className="h-5 w-5 text-gray-500 mr-2" />
+                            )}
+                            <span>{year.name}</span>
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                          {formatDateSpanish(year.start_date)} - {formatDateSpanish(year.end_date)}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500">
+                          {year.is_closed ? (
+                            <span className="inline-flex rounded-full bg-gray-100 px-2 text-xs font-semibold leading-5 text-gray-800">
+                              Cerrado
+                            </span>
+                          ) : (
+                            <span className={`inline-flex rounded-full px-2 text-xs font-semibold leading-5 ${
+                              year.is_active 
+                                ? 'bg-green-100 text-green-800' 
+                                : 'bg-gray-100 text-gray-800'
+                            }`}>
+                              {year.is_active ? 'Activo' : 'Inactivo'}
+                            </span>
+                          )}
+                        </td>
+                        <td className="whitespace-nowrap px-3 py-4 text-sm text-gray-500 text-right">
+                          <div className="flex justify-end space-x-1">
+                            {!year.is_closed ? (
+                              <>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation(); // Evitar expandir/colapsar
+                                    handleToggleYearActive(year, !year.is_active);
+                                  }}
+                                  disabled={processingYearId === year.id}
+                                  className={`px-2 py-1 text-xs font-medium rounded ${
+                                    year.is_active 
+                                      ? 'bg-yellow-100 text-yellow-800 hover:bg-yellow-200' 
+                                      : 'bg-green-100 text-green-800 hover:bg-green-200'
+                                  } disabled:opacity-50`}
+                                >
+                                  {year.is_active ? 'Desactivar' : 'Activar'}
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation(); // Evitar expandir/colapsar
+                                    handleCloseYear(year);
+                                  }}
+                                  disabled={processingYearId === year.id}
+                                  className="px-2 py-1 text-xs font-medium rounded bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-50"
+                                >
+                                  Cerrar
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setShowSupportModal(true);
+                                }}
+                                className="px-2 py-1 text-xs font-medium rounded bg-blue-100 text-blue-800 hover:bg-blue-200"
+                              >
+                                Contactar Soporte
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
                       
-                      {!year.is_closed && (
-                        <button
-                          onClick={() => {
-                            if (window.confirm(`¿Estás seguro de cerrar el año fiscal ${year.name}? Esta acción cerrará todos los períodos mensuales asociados y no podrás registrar nuevos asientos.`)) {
-                              handleCloseYear(year);
-                            }
-                          }}
-                          disabled={processingYearId === year.id}
-                          className="px-4 py-2 text-sm font-medium rounded-md text-white bg-red-500 hover:bg-red-700 disabled:opacity-50"
-                        >
-                          Cerrar Año Fiscal
-                        </button>
+                      {expandedYears.includes(year.id) && (
+                        <tr>
+                          <td colSpan={4} className="p-0">
+                            <div className="border-t border-gray-200 px-4 py-4 bg-gray-50">
+                              {!year.has_monthly_periods && !loading ? (
+                                <div className="text-center py-4">
+                                  <button
+                                    onClick={() => handleInitializeMonthlyPeriods(year.id)}
+                                    disabled={processingYearId === year.id || year.is_closed}
+                                    className="px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-500 hover:bg-blue-700 disabled:opacity-50"
+                                  >
+                                    Inicializar Períodos Mensuales
+                                  </button>
+                                </div>
+                              ) : (
+                                renderMonthlyPeriods(year.id)
+                              )}
+                            </div>
+                          </td>
+                        </tr>
                       )}
-                      
-                      {year.is_closed && (
-                        <button
-                          onClick={() => {
-                            setSelectedYearForReopen(year);
-                            setReopenReason('');
-                            setShowReopenModal(true);
-                          }}
-                          disabled={processingYearId === year.id}
-                          className="px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-500 hover:bg-blue-700 disabled:opacity-50"
-                        >
-                          Reabrir Año Fiscal
-                        </button>
-                      )}
-                    </div>
-                    
-                    {!year.has_monthly_periods && !loading ? (
-                      <div className="flex justify-center">
-                        <button
-                          onClick={() => handleInitializeMonthlyPeriods(year.id)}
-                          disabled={processingYearId === year.id}
-                          className="px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-500 hover:bg-blue-700 disabled:opacity-50"
-                        >
-                          Inicializar Períodos Mensuales
-                        </button>
-                      </div>
-                    ) : (
-                      renderMonthlyPeriods(year.id)
-                    )}
-                  </div>
-                </div>
-              )}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          ))}
+          </div>
         </div>
       )}
 
@@ -1055,187 +1104,165 @@ export function FiscalYearSettings() {
         onClose={() => setShowCreateModal(false)}
         isOpen={showCreateModal}
       >
-        <form onSubmit={handleSubmitCreateForm} className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
-          <div className="bg-blue-50 border-l-4 border-blue-400 p-3 rounded-md">
-            <p className="text-xs text-blue-700">
-              <strong>Nota:</strong> Las fechas se establecen automáticamente según el tipo de año fiscal seleccionado.
-            </p>
-          </div>
-        
-          <div>
-            <label htmlFor="name" className="block text-sm font-medium text-gray-700">
-              Nombre del Año Fiscal
-            </label>
-            <input
-              type="text"
-              id="name"
-              name="name"
-              required
-              value={formData.name}
-              onChange={handleCreateFormChange}
-              className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-            />
-          </div>
-          
-          <div>
-            <label htmlFor="fiscal_year_type" className="block text-sm font-medium text-gray-700">
-              Tipo de Año Fiscal
+        <form onSubmit={handleSubmitCreateForm} className="space-y-4">
+          {/* Tipo de año fiscal */}
+          <div className="mb-4">
+            <label htmlFor="fiscal_year_type" className="block text-sm font-medium text-gray-700 mb-1">
+              Tipo de año fiscal
             </label>
             <select
               id="fiscal_year_type"
               name="fiscal_year_type"
-              required
               value={formData.fiscal_year_type}
               onChange={handleCreateFormChange}
               disabled={!!companyFiscalYearType}
-              className={`mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm ${!!companyFiscalYearType ? 'bg-gray-50' : ''}`}
+              className="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md"
             >
-              <option value="calendar">Año Calendario (Ene-Dic)</option>
-              <option value="fiscal_mar">Año Fiscal (Abr-Mar)</option>
-              <option value="fiscal_jun">Año Fiscal (Jul-Jun)</option>
-              <option value="fiscal_sep">Año Fiscal (Oct-Sep)</option>
+              <option value="calendar">Año Calendario (Ene - Dic)</option>
+              <option value="fiscal_mar">Año Fiscal (Abr - Mar)</option>
+              <option value="fiscal_jun">Año Fiscal (Jul - Jun)</option>
+              <option value="fiscal_sep">Año Fiscal (Oct - Sep)</option>
             </select>
-            {!!companyFiscalYearType && (
-              <p className="mt-1 text-xs text-amber-600">
-                El tipo de año fiscal debe coincidir con el configurado en la empresa y no puede modificarse.
+            {companyFiscalYearType && (
+              <p className="text-sm text-gray-500 mt-1">
+                El tipo de año fiscal está configurado según la configuración de la empresa.
               </p>
             )}
-            <p className="mt-1 text-xs text-gray-500">
-              {formData.fiscal_year_type === 'calendar' && 'Período: Enero a Diciembre (1 de enero - 31 de diciembre)'}
-              {formData.fiscal_year_type === 'fiscal_mar' && 'Período: Abril a Marzo (1 de abril - 31 de marzo del año siguiente)'}
-              {formData.fiscal_year_type === 'fiscal_jun' && 'Período: Julio a Junio (1 de julio - 30 de junio del año siguiente)'}
-              {formData.fiscal_year_type === 'fiscal_sep' && 'Período: Octubre a Septiembre (1 de octubre - 30 de septiembre del año siguiente)'}
+          </div>
+
+          {/* Nombre del año fiscal */}
+          <div className="mb-4">
+            <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">
+              Nombre del período fiscal <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              name="name"
+              id="name"
+              value={formData.name}
+              onChange={handleCreateFormChange}
+              required
+              className="mt-1 focus:ring-blue-500 focus:border-blue-500 block w-full shadow-sm sm:text-sm border-gray-300 rounded-md"
+            />
+            <p className="text-sm text-gray-500 mt-1">
+              El nombre se genera automáticamente según el tipo de año fiscal, pero puede modificarlo si lo desea.
             </p>
           </div>
-          
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label htmlFor="start_date" className="block text-sm font-medium text-gray-700">
-                Fecha de Inicio
-              </label>
-              <input
-                type="date"
-                id="start_date"
-                name="start_date"
-                required
-                value={formData.start_date}
-                onChange={handleCreateFormChange}
-                disabled={true}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-gray-50"
-              />
-              <p className="mt-1 text-xs text-gray-500">
-                {formData.start_date && formatDateSpanish(formData.start_date)}
-              </p>
-            </div>
-            
-            <div>
-              <label htmlFor="end_date" className="block text-sm font-medium text-gray-700">
-                Fecha de Fin
-              </label>
-              <input
-                type="date"
-                id="end_date"
-                name="end_date"
-                required
-                value={formData.end_date}
-                onChange={handleCreateFormChange}
-                disabled={true}
-                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm bg-gray-50"
-              />
-              <p className="mt-1 text-xs text-gray-500">
-                {formData.end_date && formatDateSpanish(formData.end_date)}
-              </p>
-            </div>
-          </div>
-          
-          <div>
-            <label htmlFor="notes" className="block text-sm font-medium text-gray-700">
-              Notas (opcional)
+
+          {/* Campos ocultos para las fechas que se generan automáticamente */}
+          <input
+            type="hidden"
+            name="start_date"
+            id="start_date"
+            value={formData.start_date}
+          />
+          <input
+            type="hidden"
+            name="end_date"
+            id="end_date"
+            value={formData.end_date}
+          />
+
+          {/* Nota o descripción opcional */}
+          <div className="mb-4">
+            <label htmlFor="notes" className="block text-sm font-medium text-gray-700 mb-1">
+              Notas o descripción (opcional)
             </label>
             <textarea
-              id="notes"
               name="notes"
-              rows={2}
-              value={formData.notes}
+              id="notes"
+              rows={3}
+              value={formData.notes || ''}
               onChange={handleCreateFormChange}
-              className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-              placeholder="Notas adicionales"
+              className="mt-1 focus:ring-blue-500 focus:border-blue-500 block w-full shadow-sm sm:text-sm border-gray-300 rounded-md"
             />
           </div>
-          
-          <div className="flex justify-end mt-4">
+
+          {/* Acciones del formulario */}
+          <div className="flex justify-end mt-6 space-x-3">
             <button
               type="button"
               onClick={() => setShowCreateModal(false)}
-              className="px-4 py-2 mr-2 text-sm font-medium rounded-md text-gray-800 bg-gray-300 hover:bg-gray-400 disabled:opacity-50"
+              className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
             >
               Cancelar
             </button>
             <button
               type="submit"
-              disabled={!formData.name || !formData.start_date || !formData.end_date || loading}
-              className="px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-500 hover:bg-blue-700 disabled:opacity-50"
+              disabled={loading}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
             >
-              Crear Año Fiscal
+              {loading ? 'Creando...' : 'Crear año fiscal'}
             </button>
           </div>
         </form>
       </Modal>
 
-      {/* Modal para reabrir año fiscal */}
+      {/* Modal para contactar a soporte */}
       <Modal
-        title="Reabrir Año Fiscal"
-        onClose={() => setShowReopenModal(false)}
-        isOpen={showReopenModal}
+        title="Contactar a Soporte"
+        onClose={() => setShowSupportModal(false)}
+        isOpen={showSupportModal}
       >
-        <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-2">
-          <div className="bg-yellow-50 border-l-4 border-yellow-400 p-3 rounded-md">
+        <div className="space-y-4 p-2">
+          <div className="bg-blue-50 border-l-4 border-blue-400 p-4 rounded-md">
             <div className="flex">
-              <AlertCircle className="h-4 w-4 text-yellow-400 mt-0.5" />
-              <div className="ml-2">
-                <p className="text-xs text-yellow-700">
-                  Esta acción excepcional quedará registrada en el sistema.
+              <div className="flex-shrink-0">
+                <LifeBuoy className="h-5 w-5 text-blue-400" />
+              </div>
+              <div className="ml-3">
+                <h3 className="text-sm font-medium text-blue-800">Información importante</h3>
+                <p className="text-sm text-blue-700 mt-2">
+                  Por motivos de integridad contable y cumplimiento con las normativas fiscales, 
+                  los años fiscales y períodos mensuales que han sido cerrados no pueden reabrirse 
+                  desde la interfaz del sistema.
+                </p>
+                <p className="text-sm text-blue-700 mt-2">
+                  Para situaciones excepcionales donde sea estrictamente necesario realizar modificaciones 
+                  en períodos cerrados, por favor contacte directamente con nuestro equipo de soporte:
                 </p>
               </div>
             </div>
           </div>
           
-          <div>
-            <label htmlFor="reopen_reason" className="block text-sm font-medium text-gray-700">
-              Motivo de Reapertura (requerido)
-            </label>
-            <textarea
-              id="reopen_reason"
-              rows={3}
-              value={reopenReason}
-              onChange={(e) => setReopenReason(e.target.value)}
-              className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
-              placeholder="Explique el motivo por el que necesita reabrir este año fiscal"
-              required
-            />
+          <div className="p-4 border border-gray-200 rounded-md">
+            <h4 className="text-base font-medium text-gray-800 mb-2">Canales de soporte</h4>
+            <ul className="space-y-3">
+              <li className="flex items-start">
+                <span className="text-green-500 mr-2">•</span>
+                <span className="text-sm text-gray-600">
+                  <strong>Email:</strong> soporte@contadom.com
+                </span>
+              </li>
+              <li className="flex items-start">
+                <span className="text-green-500 mr-2">•</span>
+                <span className="text-sm text-gray-600">
+                  <strong>Teléfono:</strong> +1 (809) 555-1234
+                </span>
+              </li>
+              <li className="flex items-start">
+                <span className="text-green-500 mr-2">•</span>
+                <span className="text-sm text-gray-600">
+                  <strong>Horario:</strong> Lunes a Viernes, 8:00 AM - 6:00 PM
+                </span>
+              </li>
+            </ul>
           </div>
           
-          <div className="flex justify-end mt-4">
+          <div className="mt-6 text-sm text-gray-500">
+            <p>
+              Recuerde que cualquier modificación en períodos cerrados debe estar debidamente justificada 
+              y documentada de acuerdo con las normativas contables aplicables.
+            </p>
+          </div>
+          
+          <div className="flex justify-end mt-6">
             <button
               type="button"
-              onClick={() => {
-                setShowReopenModal(false);
-                setSelectedYearForReopen(null);
-              }}
-              className="px-4 py-2 mr-2 text-sm font-medium rounded-md text-gray-800 bg-gray-300 hover:bg-gray-400 disabled:opacity-50"
+              onClick={() => setShowSupportModal(false)}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
             >
-              Cancelar
-            </button>
-            <button
-              onClick={() => {
-                if (selectedYearForReopen && selectedYearForReopen.id) {
-                  handleReopenYear();
-                }
-              }}
-              disabled={!reopenReason.trim() || processingYearId !== null}
-              className="px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-500 hover:bg-blue-700 disabled:opacity-50"
-            >
-              Confirmar
+              Entendido
             </button>
           </div>
         </div>

@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import { X } from 'lucide-react';
+import { createPortal } from 'react-dom';
 
 interface ModalProps {
   title: string;
@@ -50,7 +51,8 @@ export default function Modal({ title, children, onClose, size = 'md', isOpen = 
     }
   };
 
-  return (
+  // Usar createPortal para renderizar el modal fuera de la jerarquía de componentes
+  return createPortal(
     <div className="fixed inset-0 z-50 overflow-y-auto">
       {/* Fondo oscuro */}
       <div 
@@ -91,6 +93,7 @@ export default function Modal({ title, children, onClose, size = 'md', isOpen = 
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 } 

@@ -278,16 +278,16 @@ export function CompanySettings() {
               className={`mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm ${fiscalYearTypeIsSet ? 'bg-gray-100' : ''}`}
               required
             >
-              <option value="calendar">Año Calendario (Ene-Dic)</option>
-              <option value="fiscal_mar">Año Fiscal (Abr-Mar)</option>
-              <option value="fiscal_jun">Año Fiscal (Jul-Jun)</option>
-              <option value="fiscal_sep">Año Fiscal (Oct-Sep)</option>
+              <option value="calendar">Año Calendario (01-Ene a 31-Dic)</option>
+              <option value="fiscal_mar">Año Fiscal (01-Abr a 31-Mar)</option>
+              <option value="fiscal_jun">Año Fiscal (01-Jul a 30-Jun)</option>
+              <option value="fiscal_sep">Año Fiscal (01-Oct a 30-Sep)</option>
             </select>
             <p className="mt-1 text-xs text-gray-500">
-              {companyData.fiscal_year_type === 'calendar' && 'Período: Enero a Diciembre (01/01 - 31/12)'}
-              {companyData.fiscal_year_type === 'fiscal_mar' && 'Período: Abril a Marzo (01/04 - 31/03)'}
-              {companyData.fiscal_year_type === 'fiscal_jun' && 'Período: Julio a Junio (01/07 - 30/06)'}
-              {companyData.fiscal_year_type === 'fiscal_sep' && 'Período: Octubre a Septiembre (01/10 - 30/09)'}
+              {companyData.fiscal_year_type === 'calendar' && 'Período: del 01-Ene hasta el 31-Dic del mismo año.'}
+              {companyData.fiscal_year_type === 'fiscal_mar' && 'Período: del 01-Abr hasta el 31-Mar del año siguiente.'}
+              {companyData.fiscal_year_type === 'fiscal_jun' && 'Período: del 01-Jul hasta el 30-Jun del año siguiente.'}
+              {companyData.fiscal_year_type === 'fiscal_sep' && 'Período: del 01-Oct hasta el 30-Sep del año siguiente.'}
             </p>
             {!fiscalYearTypeIsSet && (
               <p className="mt-1 text-xs text-blue-600">

@@ -75,10 +75,32 @@ const supabaseOptions = {
         console.log(`Iniciando petición a: ${url.split('?')[0]}`);
         
         // Corregir problemas con peticiones a user_profiles y company_settings
-        if (url.includes('/user_profiles') && url.includes('id=eq.')) {
-          // Corregir formato de consulta para user_profiles
-          const newUrl = url.replace(/id=eq\.([^&]+)/, 'id=eq.$1');
-          args[0] = newUrl;
+        if (url.includes('/user_profiles')) {
+          // Asegurar que el encabezado Accept y Content-Type estén correctamente configurados
+          if (args[1] && typeof args[1] === 'object') {
+            const options = args[1] as RequestInit;
+            if (!options.headers) {
+              options.headers = {};
+            }
+            
+            const headers = options.headers as Record<string, string>;
+            headers['Accept'] = 'application/json';
+            headers['Content-Type'] = 'application/json';
+            
+            // Si es una consulta por email, aseguramos que esté correctamente formateada
+            if (url.includes('email=eq.')) {
+              // Decodificar y volver a codificar para asegurar formato correcto
+              const decodedUrl = decodeURIComponent(url);
+              const emailRegex = /email=eq\.([^&]+)/;
+              const match = decodedUrl.match(emailRegex);
+              
+              if (match && match[1]) {
+                const email = match[1].toLowerCase();
+                const newUrl = decodedUrl.replace(emailRegex, `email=eq.${encodeURIComponent(email)}`);
+                args[0] = newUrl;
+              }
+            }
+          }
         }
         
         // Corregir problema con campo 'logo' vs 'logo_url' en company_settings
