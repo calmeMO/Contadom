@@ -30,6 +30,10 @@ export default function FinancialStatements() {
   const [error, setError] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
   
+  // Nuevo estado para años fiscales
+  const [fiscalYears, setFiscalYears] = useState<{id: string, name: string, is_active: boolean}[]>([]);
+  const [selectedFiscalYear, setSelectedFiscalYear] = useState<string>('');
+  
   // Estado para Balance General
   const [balanceSheet, setBalanceSheet] = useState<{
     assets: FinancialAccount[];
@@ -53,10 +57,17 @@ export default function FinancialStatements() {
     netIncome: number;
   } | null>(null);
 
-  // Cargar período activo al iniciar
+  // Cargar datos cuando se inicia
   useEffect(() => {
-    fetchActivePeriod();
+    fetchFiscalYears();
   }, []);
+  
+  // Cargar datos financieros cuando cambia el año fiscal
+  useEffect(() => {
+    if (selectedFiscalYear) {
+      fetchActivePeriodByFiscalYear(selectedFiscalYear);
+    }
+  }, [selectedFiscalYear]);
 
   // Cargar datos financieros cuando se tiene el período activo
   useEffect(() => {
@@ -65,7 +76,86 @@ export default function FinancialStatements() {
     }
   }, [activePeriod]);
 
-  // Función para cargar el período contable activo
+  // Función para cargar los años fiscales disponibles
+  async function fetchFiscalYears() {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      // Obtener todos los años fiscales
+      const { data, error } = await supabase
+        .from('accounting_periods')
+        .select('id, name, is_active')
+        .eq('is_month', false)
+        .order('start_date', { ascending: false });
+
+      if (error) throw error;
+
+      if (!data || data.length === 0) {
+        setError('No se encontraron años fiscales');
+        toast.warning('No se encontraron años fiscales');
+        return;
+      }
+      
+      setFiscalYears(data);
+      
+      // Seleccionar automáticamente el año fiscal activo
+      const activeYear = data.find(year => year.is_active);
+      if (activeYear) {
+        setSelectedFiscalYear(activeYear.id);
+      } else {
+        // Si no hay año activo, seleccionar el más reciente
+        setSelectedFiscalYear(data[0].id);
+      }
+    } catch (error) {
+      console.error('Error al cargar años fiscales:', error);
+      toast.error('Error al cargar los años fiscales');
+      setError('No se pudieron cargar los años fiscales');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Función para cargar el período activo por año fiscal
+  async function fetchActivePeriodByFiscalYear(fiscalYearId: string) {
+    try {
+      setLoading(true);
+      setError(null);
+      
+      // Verificar primero si el año fiscal existe
+      const { data: yearData, error: yearError } = await supabase
+        .from('accounting_periods')
+        .select('id, name, start_date, end_date, is_active, is_closed')
+        .eq('id', fiscalYearId)
+        .maybeSingle();
+        
+      if (yearError || !yearData) {
+        console.error('Error o año fiscal no encontrado:', yearError || 'No data');
+        setError('El año fiscal seleccionado no existe o no está disponible');
+        setActivePeriod(null);
+        setLoading(false);
+        return;
+      }
+      
+      // Usamos directamente el año fiscal completo como período activo
+      setActivePeriod({
+        id: yearData.id,
+        name: yearData.name,
+        start_date: yearData.start_date,
+        end_date: yearData.end_date
+      });
+      
+      setLoading(false);
+    } catch (error) {
+      console.error('Error al cargar período activo:', error);
+      toast.error('Error al cargar el período activo');
+      setError('No se pudo cargar el período activo');
+      setActivePeriod(null);
+      setLoading(false);
+    }
+  }
+
+  // Función para cargar el período contable activo (mantiene compatibilidad)
   async function fetchActivePeriod() {
     try {
       setLoading(true);
@@ -101,12 +191,35 @@ export default function FinancialStatements() {
 
   // Función para cargar los reportes financieros
   const fetchFinancialReports = useCallback(async (periodId: string) => {
-    if (!periodId) return;
+    if (!periodId) {
+      console.log('No se especificó ID de período');
+      return;
+    }
     
     setError(null);
     setLoading(true);
     
     try {
+      // Verificar primero si el período existe
+      const { data: periodExists, error: periodError } = await supabase
+        .from('monthly_accounting_periods')
+        .select('id')
+        .eq('id', periodId)
+        .maybeSingle();
+        
+      // Si no es un período mensual, verificar si es un año fiscal
+      if (!periodExists && !periodError) {
+        const { data: yearExists, error: yearError } = await supabase
+          .from('accounting_periods')
+          .select('id')
+          .eq('id', periodId)
+          .maybeSingle();
+          
+        if (!yearExists || yearError) {
+          throw new Error('El período seleccionado no existe');
+        }
+      }
+      
       // Cargar Balance General
       const balanceSheetData = await generateBalanceSheet(periodId);
       setBalanceSheet(balanceSheetData);
@@ -132,16 +245,45 @@ export default function FinancialStatements() {
     try {
       setIsExporting(true);
       
-      const excelData = prepareBalanceSheetExport(
-        activePeriod.name,
-        balanceSheet.assets,
-        balanceSheet.liabilities,
-        balanceSheet.equity,
-        balanceSheet.totalAssets,
-        balanceSheet.totalLiabilities,
-        balanceSheet.totalEquity,
-        balanceSheet.netIncome
-      );
+      // Obtener el nombre del año fiscal seleccionado
+      const selectedFiscalYearName = fiscalYears.find(y => y.id === selectedFiscalYear)?.name || '';
+      
+      const excelData = [
+        ['BALANCE GENERAL'],
+        [`Fecha de generación: ${format(new Date(), 'dd/MM/yyyy')}`],
+        [`Año fiscal: ${selectedFiscalYearName}`],
+        [`Datos acumulados desde: ${format(new Date(activePeriod.start_date), 'dd/MM/yyyy')} hasta: ${format(new Date(activePeriod.end_date), 'dd/MM/yyyy')}`],
+        [''],
+        ['ACTIVOS'],
+        ['Código', 'Cuenta', 'Monto'],
+        ...balanceSheet.assets.map(account => [
+          account.code,
+          account.name,
+          account.balance,
+        ]),
+        ['', 'Total Activos', balanceSheet.totalAssets],
+        [''],
+        ['PASIVOS'],
+        ['Código', 'Cuenta', 'Monto'],
+        ...balanceSheet.liabilities.map(account => [
+          account.code,
+          account.name,
+          account.balance,
+        ]),
+        ['', 'Total Pasivos', balanceSheet.totalLiabilities],
+        [''],
+        ['CAPITAL'],
+        ['Código', 'Cuenta', 'Monto'],
+        ...balanceSheet.equity.map(account => [
+          account.code,
+          account.name,
+          account.balance,
+        ]),
+        ['', 'Utilidad del Período', balanceSheet.netIncome],
+        ['', 'Total Capital', balanceSheet.totalEquity + balanceSheet.netIncome],
+        [''],
+        ['', 'TOTAL PASIVO Y CAPITAL', balanceSheet.balanceTotal],
+      ];
 
       const wb = XLSX.utils.book_new();
       const ws = XLSX.utils.aoa_to_sheet(excelData);
@@ -155,7 +297,11 @@ export default function FinancialStatements() {
       ];
 
       // Aplicar formato de moneda a la columna de montos
-      for (let i = 6; i < excelData.length; i++) {
+      for (let i = 8; i < excelData.length; i++) {
+        if (i === 9 || i === 10 || i === 13 || i === 14 || i === 15 ||
+            i === 18 || i === 19 || i === 22 || i === 23 || i === 24 || i === 26) {
+          continue;
+        }
         const cell = XLSX.utils.encode_cell({ r: i, c: 2 }); // columna C (índice 2)
         if (ws[cell] && typeof ws[cell].v === 'number') {
           ws[cell].z = '"$"#,##0.00';
@@ -180,16 +326,44 @@ export default function FinancialStatements() {
     try {
       setIsExporting(true);
       
-      const excelData = prepareIncomeStatementExport(
-        activePeriod.name,
-        incomeStatement.revenue,
-        incomeStatement.expenses,
-        incomeStatement.costs,
-        incomeStatement.totalRevenue,
-        incomeStatement.totalExpenses,
-        incomeStatement.totalCosts,
-        incomeStatement.netIncome
-      );
+      // Obtener el nombre del año fiscal seleccionado
+      const selectedFiscalYearName = fiscalYears.find(y => y.id === selectedFiscalYear)?.name || '';
+      
+      const excelData = [
+        ['ESTADO DE RESULTADOS'],
+        [`Fecha de generación: ${format(new Date(), 'dd/MM/yyyy')}`],
+        [`Año fiscal: ${selectedFiscalYearName}`],
+        [`Datos acumulados desde: ${format(new Date(activePeriod.start_date), 'dd/MM/yyyy')} hasta: ${format(new Date(activePeriod.end_date), 'dd/MM/yyyy')}`],
+        [''],
+        ['INGRESOS'],
+        ['Código', 'Cuenta', 'Monto'],
+        ...incomeStatement.revenue.map(account => [
+          account.code,
+          account.name,
+          account.balance,
+        ]),
+        ['', 'Total Ingresos', incomeStatement.totalRevenue],
+        [''],
+        ['COSTOS'],
+        ['Código', 'Cuenta', 'Monto'],
+        ...incomeStatement.costs.map(account => [
+          account.code,
+          account.name,
+          account.balance,
+        ]),
+        ['', 'Total Costos', incomeStatement.totalCosts],
+        [''],
+        ['GASTOS'],
+        ['Código', 'Cuenta', 'Monto'],
+        ...incomeStatement.expenses.map(account => [
+          account.code,
+          account.name,
+          account.balance,
+        ]),
+        ['', 'Total Gastos', incomeStatement.totalExpenses],
+        [''],
+        ['', 'UTILIDAD NETA', incomeStatement.netIncome],
+      ];
 
       const wb = XLSX.utils.book_new();
       const ws = XLSX.utils.aoa_to_sheet(excelData);
@@ -203,7 +377,11 @@ export default function FinancialStatements() {
       ];
 
       // Aplicar formato de moneda a la columna de montos
-      for (let i = 6; i < excelData.length; i++) {
+      for (let i = 8; i < excelData.length; i++) {
+        if (i === 9 || i === 10 || i === 11 || i === 14 || i === 15 || 
+            i === 16 || i === 19 || i === 20 || i === 21) {
+          continue;
+        }
         const cell = XLSX.utils.encode_cell({ r: i, c: 2 }); // columna C (índice 2)
         if (ws[cell] && typeof ws[cell].v === 'number') {
           ws[cell].z = '"$"#,##0.00';
@@ -490,60 +668,64 @@ export default function FinancialStatements() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold text-gray-900">Estados Financieros</h1>
-      </div>
-
-      {/* Información del período y tabs */}
-      <div className="bg-white shadow sm:rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          {activePeriod && (
-            <div className="mb-4">
-              <h3 className="text-lg leading-6 font-medium text-gray-900 flex items-center">
-                <Calendar className="h-5 w-5 mr-2" />
-                Período Activo: {activePeriod.name}
-              </h3>
-              <p className="mt-1 text-sm text-gray-500">
-                Desde {format(new Date(activePeriod.start_date), 'dd/MM/yyyy')} hasta {format(new Date(activePeriod.end_date), 'dd/MM/yyyy')}
-              </p>
-            </div>
-          )}
-
-          {/* Tabs */}
-          <div className="border-b border-gray-200">
-            <nav className="-mb-px flex space-x-8">
-              <button
-                onClick={() => setActiveTab('balance')}
-                className={`${
-                  activeTab === 'balance'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center`}
-              >
-                Balance General
-              </button>
-              <button
-                onClick={() => setActiveTab('income')}
-                className={`${
-                  activeTab === 'income'
-                    ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center`}
-              >
-                Estado de Resultados
-              </button>
-            </nav>
+    <div className="container mx-auto px-4 py-8">
+      <div className="mb-6">
+        <div className="flex justify-between items-center">
+          <h1 className="text-2xl font-bold">Estados Financieros</h1>
+          <div className="w-64">
+            <label htmlFor="fiscalYear" className="block text-sm font-medium text-gray-700 mb-1">
+              Año Fiscal
+            </label>
+            <select
+              id="fiscalYear"
+              className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+              value={selectedFiscalYear}
+              onChange={(e) => setSelectedFiscalYear(e.target.value)}
+              disabled={loading}
+            >
+              <option value="">Seleccionar año fiscal...</option>
+              {fiscalYears.map((year) => (
+                <option key={year.id} value={year.id}>
+                  {year.name} {year.is_active ? '(Activo)' : ''}
+                </option>
+              ))}
+            </select>
           </div>
         </div>
-      </div>
 
-      {/* Contenido principal */}
-      <div className="bg-white shadow sm:rounded-lg">
-        <div className="px-4 py-5 sm:p-6">
-          {renderContent()}
+        {activePeriod && (
+          <div className="mt-2 text-sm text-gray-600">
+            Datos acumulados del año fiscal: {activePeriod.name} ({format(new Date(activePeriod.start_date), 'dd/MM/yyyy')} - {format(new Date(activePeriod.end_date), 'dd/MM/yyyy')})
+          </div>
+        )}
+
+        <div className="border-b border-gray-200 mt-4">
+          <nav className="-mb-px flex" aria-label="Tabs">
+            <button
+              onClick={() => setActiveTab('balance')}
+              className={`whitespace-nowrap py-2 px-4 border-b-2 font-medium text-sm ${
+                activeTab === 'balance'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Balance General
+            </button>
+            <button
+              onClick={() => setActiveTab('income')}
+              className={`ml-8 whitespace-nowrap py-2 px-4 border-b-2 font-medium text-sm ${
+                activeTab === 'income'
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+              }`}
+            >
+              Estado de Resultados
+            </button>
+          </nav>
         </div>
       </div>
+
+      {renderContent()}
     </div>
   );
 } 

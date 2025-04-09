@@ -18,6 +18,7 @@ type BalanceItem = {
   totalCredit: number;
   debitBalance: number;
   creditBalance: number;
+  isParent?: boolean;
 };
 
 export function Balance() {
@@ -26,6 +27,7 @@ export function Balance() {
   const [periods, setPeriods] = useState<{ id: string; name: string }[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState('');
   const [showAdjusted, setShowAdjusted] = useState(false);
+  const [showParentAccounts, setShowParentAccounts] = useState(true);
   const [totals, setTotals] = useState({
     totalDebit: 0,
     totalCredit: 0,
@@ -53,6 +55,27 @@ export function Balance() {
         return;
       }
 
+      // Verificar primero si el período existe
+      const { data: periodExists, error: periodCheckError } = await supabase
+        .from('accounting_periods')
+        .select('id')
+        .eq('id', selectedPeriod)
+        .maybeSingle();
+        
+      if (!periodExists || periodCheckError) {
+        console.error('Error o período no encontrado:', periodCheckError || 'No data');
+        toast.error('El período seleccionado no existe o no está disponible');
+        setBalanceData([]);
+        setTotals({
+          totalDebit: 0,
+          totalCredit: 0,
+          totalDebitBalance: 0,
+          totalCreditBalance: 0,
+        });
+        setLoading(false);
+        return;
+      }
+
       // Get the selected period details
       const { data: periodData, error: periodError } = await supabase
         .from('accounting_periods')
@@ -60,16 +83,27 @@ export function Balance() {
         .eq('id', selectedPeriod)
         .single();
 
-      if (periodError) throw periodError;
+      if (periodError) {
+        console.error('Error al obtener detalles del período:', periodError);
+        toast.error('Error al obtener detalles del período');
+        setLoading(false);
+        return;
+      }
 
       // Get all active accounts
       const { data: accounts, error: accountsError } = await supabase
         .from('accounts')
-        .select('id, code, name, type')
+        .select('id, code, name, type, parent_id')
         .eq('is_active', true)
         .order('code');
 
       if (accountsError) throw accountsError;
+
+      // Crear mapa de cuentas para acceso rápido
+      const accountMap = accounts.reduce((map: Record<string, Account & { parent_id?: string }>, acc) => {
+        map[acc.id] = acc;
+        return map;
+      }, {});
 
       // Optimización: En lugar de hacer una consulta por cada cuenta, hacemos una sola consulta
       // para obtener todos los movimientos del período, y luego los procesamos en memoria
@@ -112,17 +146,30 @@ export function Balance() {
         }
       });
 
-      // Calcular balanza con los datos procesados
+      // Calcular totales por cuenta padre
+      const parentTotals: { [parentId: string]: { debit: number, credit: number } } = {};
+      
+      // Preparar la balanza incluyendo cuentas con movimientos
       const balanceItems: BalanceItem[] = [];
       let totalDebit = 0;
       let totalCredit = 0;
       let totalDebitBalance = 0;
       let totalCreditBalance = 0;
 
+      // Primero procesar las cuentas con movimientos
       for (const account of accounts) {
         const movements = accountMovements[account.id];
         const accountTotalDebit = movements.debit;
         const accountTotalCredit = movements.credit;
+        
+        // Acumular totales para cuentas padre
+        if (account.parent_id && (accountTotalDebit > 0 || accountTotalCredit > 0)) {
+          if (!parentTotals[account.parent_id]) {
+            parentTotals[account.parent_id] = { debit: 0, credit: 0 };
+          }
+          parentTotals[account.parent_id].debit += accountTotalDebit;
+          parentTotals[account.parent_id].credit += accountTotalCredit;
+        }
         
         // Solo incluir cuentas con movimientos
         if (accountTotalDebit > 0 || accountTotalCredit > 0) {
@@ -153,6 +200,7 @@ export function Balance() {
             totalCredit: accountTotalCredit,
             debitBalance,
             creditBalance,
+            isParent: false
           });
 
           totalDebit += accountTotalDebit;
@@ -161,6 +209,49 @@ export function Balance() {
           totalCreditBalance += creditBalance;
         }
       }
+      
+      // Ahora agregar las cuentas padre con sus totales acumulados
+      if (showParentAccounts) {
+        for (const [parentId, totals] of Object.entries(parentTotals)) {
+          const parentAccount = accountMap[parentId];
+          if (parentAccount) {
+            const parentTotalDebit = totals.debit;
+            const parentTotalCredit = totals.credit;
+            const difference = parentTotalDebit - parentTotalCredit;
+            
+            let debitBalance = 0;
+            let creditBalance = 0;
+            
+            if (parentAccount.type === 'activo' || parentAccount.type === 'gasto' || parentAccount.type === 'costo') {
+              // Cuentas de naturaleza deudora
+              if (difference > 0) {
+                debitBalance = difference;
+              } else {
+                creditBalance = Math.abs(difference);
+              }
+            } else {
+              // Cuentas de naturaleza acreedora (pasivo, patrimonio, ingreso)
+              if (difference < 0) {
+                creditBalance = Math.abs(difference);
+              } else {
+                debitBalance = difference;
+              }
+            }
+            
+            balanceItems.push({
+              account: parentAccount,
+              totalDebit: parentTotalDebit,
+              totalCredit: parentTotalCredit,
+              debitBalance,
+              creditBalance,
+              isParent: true
+            });
+          }
+        }
+      }
+      
+      // Ordenar por código de cuenta
+      balanceItems.sort((a, b) => a.account.code.localeCompare(b.account.code));
 
       setBalanceData(balanceItems);
       setTotals({
@@ -182,7 +273,7 @@ export function Balance() {
     } finally {
       setLoading(false);
     }
-  }, [selectedPeriod, showAdjusted]);
+  }, [selectedPeriod, showAdjusted, showParentAccounts]);
 
   useEffect(() => {
     if (selectedPeriod) {
@@ -244,13 +335,19 @@ export function Balance() {
       const currentDate = new Date();
       const formattedDate = format(currentDate, 'dd/MM/yyyy');
       
+      // Obtener nombre del período seleccionado
+      const selectedPeriodName = periods.find(p => p.id === selectedPeriod)?.name || '';
+      
       // Prepare data for Excel
       const excelData = [
         [showAdjusted ? 'BALANZA DE COMPROBACIÓN AJUSTADA' : 'BALANZA DE COMPROBACIÓN'],
         [`Fecha: ${formattedDate}`],
+        [`Período: ${selectedPeriodName}`],
+        [`Tipo: ${showAdjusted ? 'Ajustada' : 'Regular'}`],
+        [`Incluye cuentas padre: ${showParentAccounts ? 'Sí' : 'No'}`],
         [''],
-        ['Código', 'Cuenta', 'Tipo', 'Movimientos', '', 'Saldos', ''],
-        ['', '', '', 'Débito', 'Crédito', 'Deudor', 'Acreedor'],
+        ['Código', 'Cuenta', 'Tipo', 'Movimientos', '', 'Saldos', '', 'Tipo de cuenta'],
+        ['', '', '', 'Débito', 'Crédito', 'Deudor', 'Acreedor', ''],
         ...balanceData.map(item => [
           item.account.code,
           item.account.name,
@@ -259,9 +356,10 @@ export function Balance() {
           item.totalCredit,
           item.debitBalance,
           item.creditBalance,
+          item.isParent ? 'Cuenta Padre' : 'Cuenta Detalle'
         ]),
         [''],
-        ['TOTALES', '', '', totals.totalDebit, totals.totalCredit, totals.totalDebitBalance, totals.totalCreditBalance],
+        ['TOTALES', '', '', totals.totalDebit, totals.totalCredit, totals.totalDebitBalance, totals.totalCreditBalance, ''],
       ];
 
       // Create workbook and worksheet
@@ -277,6 +375,7 @@ export function Balance() {
         { wch: 15 }, // Crédito
         { wch: 15 }, // Deudor
         { wch: 15 }, // Acreedor
+        { wch: 15 }, // Tipo de cuenta
       ];
 
       // Add worksheet to workbook
@@ -318,27 +417,28 @@ export function Balance() {
         </div>
       </div>
 
-      <div className="bg-white rounded-lg shadow-md p-6 mb-8">
-        <div className="flex flex-col md:flex-row md:items-end gap-4 mb-6">
-          <div className="flex-1">
-            <label htmlFor="period" className="block text-sm font-medium text-gray-700 mb-1">
-              Periodo Contable
-            </label>
-            <select
-              id="period"
-              className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
-              value={selectedPeriod}
-              onChange={(e) => setSelectedPeriod(e.target.value)}
-              disabled={loading}
-            >
-              <option value="">Seleccionar...</option>
-              {periods.map((period) => (
-                <option key={period.id} value={period.id}>
-                  {period.name}
-                </option>
-              ))}
-            </select>
-          </div>
+      <div className="bg-white shadow-md rounded-lg overflow-hidden border border-gray-200">
+        <div className="p-4 border-b border-gray-200">
+          <div className="flex flex-col sm:flex-row justify-between gap-4">
+            <div className="flex-1">
+              <label htmlFor="period" className="block text-sm font-medium text-gray-700 mb-1">
+                Período
+              </label>
+              <select
+                id="period"
+                className="w-full border-gray-300 rounded-md shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                value={selectedPeriod}
+                onChange={(e) => setSelectedPeriod(e.target.value)}
+                disabled={loading}
+              >
+                <option value="">Seleccione un período</option>
+                {periods.map(period => (
+                  <option key={period.id} value={period.id}>
+                    {period.name}
+                  </option>
+                ))}
+              </select>
+            </div>
           
           <div className="flex-1">
             <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
@@ -374,24 +474,47 @@ export function Balance() {
               </label>
             </div>
           </div>
+          
+          <div className="flex-1">
+            <label className="block text-sm font-medium text-gray-700 mb-1 flex items-center">
+              Mostrar cuentas padre
+              <div className="relative ml-1 group">
+                <HelpCircle size={16} className="text-gray-400 cursor-help" />
+                <div className="absolute left-0 bottom-full mb-2 w-72 bg-black text-white text-xs rounded p-2 hidden group-hover:block z-10">
+                  <p>Cuando está activado, muestra las cuentas padre con los totales acumulados de sus subcuentas.</p>
+                </div>
+              </div>
+            </label>
+            <div className="flex gap-4">
+              <label className="inline-flex items-center">
+                <input
+                  type="checkbox"
+                  className="form-checkbox h-4 w-4 text-blue-600"
+                  checked={showParentAccounts}
+                  onChange={() => setShowParentAccounts(!showParentAccounts)}
+                  name="showParentAccounts"
+                />
+                <span className="ml-2">Mostrar cuentas padre</span>
+              </label>
+            </div>
+          </div>
         </div>
+      </div>
 
         {/* Balance Data */}
-        <div className="bg-white shadow rounded-lg overflow-hidden">
-          <div className="px-4 py-5 sm:p-6">
+        <div className="p-4">
+          <div>
             {loading ? (
               <div className="flex justify-center items-center py-12">
                 <Loader className="h-8 w-8 text-blue-500 animate-spin" />
-                <span className="ml-2 text-gray-500">Cargando datos...</span>
+                <span className="ml-2 text-gray-600">Cargando datos...</span>
               </div>
             ) : balanceData.length === 0 ? (
               <div className="text-center py-12">
-                <FileText className="mx-auto h-12 w-12 text-gray-400" />
-                <h3 className="mt-2 text-sm font-medium text-gray-900">
-                  No hay datos para mostrar
-                </h3>
+                <Filter className="mx-auto h-12 w-12 text-gray-400" />
+                <h3 className="mt-2 text-sm font-medium text-gray-900">No hay datos para mostrar</h3>
                 <p className="mt-1 text-sm text-gray-500">
-                  No se encontraron movimientos en el periodo seleccionado.
+                  Seleccione un período para visualizar la balanza de comprobación.
                 </p>
               </div>
             ) : (
@@ -416,50 +539,50 @@ export function Balance() {
                       </th>
                     </tr>
                     <tr>
-                      <th scope="col" className="px-6 py-3"></th>
-                      <th scope="col" className="px-6 py-3"></th>
-                      <th scope="col" className="px-6 py-3"></th>
-                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-400"></th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-400"></th>
+                      <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-400"></th>
+                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">
                         Débito
                       </th>
-                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">
                         Crédito
                       </th>
-                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">
                         Deudor
                       </th>
-                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                      <th scope="col" className="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">
                         Acreedor
                       </th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
-                    {balanceData.map((item) => (
-                      <tr key={item.account.id}>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                    {balanceData.map((item, index) => (
+                      <tr key={`${item.account.id}-${index}`} className={item.isParent ? 'bg-gray-50 font-semibold' : ''}>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                           {item.account.code}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                          {item.account.name}
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          {item.account.name} {item.isParent && '(Cuenta Padre)'}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                           {getAccountTypeLabel(item.account.type)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
                           {formatCurrency(item.totalDebit)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
                           {formatCurrency(item.totalCredit)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
                           {formatCurrency(item.debitBalance)}
                         </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 text-right">
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
                           {formatCurrency(item.creditBalance)}
                         </td>
                       </tr>
                     ))}
-                    {/* Totals row */}
+                    
                     <tr className="bg-gray-50 font-semibold">
                       <td colSpan={3} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         TOTALES

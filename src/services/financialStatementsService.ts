@@ -25,158 +25,270 @@ export interface FinancialAccount extends Account {
 }
 
 /**
- * Obtiene los datos financieros para un período específico
+ * Función base para obtener los datos financieros
  */
-export async function fetchFinancialData(periodId: string): Promise<FinancialData> {
+export async function fetchFinancialData(periodId: string) {
   try {
+    console.log('Obteniendo datos financieros para el período:', periodId);
+    
     if (!periodId) {
-      throw new Error('Es necesario especificar un período contable');
+      throw new Error('ID de período no especificado');
     }
-
-    // Obtener detalles del período seleccionado
-    const { data: periodDetails, error: periodError } = await supabase
-      .from('accounting_periods')
+    
+    // Verificar si es un período mensual o un año fiscal
+    let startDate, endDate;
+    
+    // Intentar obtener datos del período mensual
+    const { data: monthlyPeriod, error: monthlyError } = await supabase
+      .from('monthly_accounting_periods')
       .select('start_date, end_date')
       .eq('id', periodId)
-      .single();
+      .maybeSingle();
+      
+    if (monthlyPeriod) {
+      startDate = monthlyPeriod.start_date;
+      endDate = monthlyPeriod.end_date;
+    } else {
+      // Si no es un período mensual, intentar como año fiscal
+      const { data: yearlyPeriod, error: yearlyError } = await supabase
+        .from('accounting_periods')
+        .select('start_date, end_date')
+        .eq('id', periodId)
+        .maybeSingle();
+        
+      if (yearlyPeriod) {
+        startDate = yearlyPeriod.start_date;
+        endDate = yearlyPeriod.end_date;
+      } else {
+        throw new Error('Período no encontrado');
+      }
+    }
+    
+    // Verificar que tenemos fechas válidas
+    if (!startDate || !endDate) {
+      throw new Error('Fechas de período incorrectas o no disponibles');
+    }
+    
+    console.log('Período encontrado:', { startDate, endDate });
 
-    if (periodError) throw periodError;
-    if (!periodDetails) throw new Error('No se encontró el período contable');
-
-    // Obtener todas las cuentas contables activas
-    const { data: accounts, error: accountsError } = await supabase
+    // Obtener cuentas de activos
+    const { data: assets, error: assetsError } = await supabase
       .from('accounts')
-      .select('*')
+      .select('id, code, name, parent_id')
+      .eq('type', 'activo')
       .eq('is_active', true)
       .order('code');
 
-    if (accountsError) throw accountsError;
-    if (!accounts || accounts.length === 0) {
-      throw new Error('No se encontraron cuentas contables activas');
-    }
+    if (assetsError) throw assetsError;
 
-    // Obtener todos los movimientos del período
-    const { data: allMovements, error: movementsError } = await supabase
+    // Obtener cuentas de pasivos
+    const { data: liabilities, error: liabilitiesError } = await supabase
+      .from('accounts')
+      .select('id, code, name, parent_id')
+      .eq('type', 'pasivo')
+      .eq('is_active', true)
+      .order('code');
+
+    if (liabilitiesError) throw liabilitiesError;
+
+    // Obtener cuentas de patrimonio
+    const { data: equity, error: equityError } = await supabase
+      .from('accounts')
+      .select('id, code, name, parent_id')
+      .eq('type', 'patrimonio')
+      .eq('is_active', true)
+      .order('code');
+
+    if (equityError) throw equityError;
+
+    // Obtener cuentas de ingresos
+    const { data: revenue, error: revenueError } = await supabase
+      .from('accounts')
+      .select('id, code, name, parent_id')
+      .eq('type', 'ingreso')
+      .eq('is_active', true)
+      .order('code');
+
+    if (revenueError) throw revenueError;
+
+    // Obtener cuentas de gastos
+    const { data: expenses, error: expensesError } = await supabase
+      .from('accounts')
+      .select('id, code, name, parent_id')
+      .eq('type', 'gasto')
+      .eq('is_active', true)
+      .order('code');
+
+    if (expensesError) throw expensesError;
+
+    // Obtener cuentas de costos
+    const { data: costs, error: costsError } = await supabase
+      .from('accounts')
+      .select('id, code, name, parent_id')
+      .eq('type', 'costo')
+      .eq('is_active', true)
+      .order('code');
+
+    if (costsError) throw costsError;
+
+    // Combinar todas las cuentas en un solo arreglo
+    const allAccounts = [
+      ...(assets || []).map(account => ({ ...account, type: 'activo' })),
+      ...(liabilities || []).map(account => ({ ...account, type: 'pasivo' })),
+      ...(equity || []).map(account => ({ ...account, type: 'patrimonio' })),
+      ...(revenue || []).map(account => ({ ...account, type: 'ingreso' })),
+      ...(expenses || []).map(account => ({ ...account, type: 'gasto' })),
+      ...(costs || []).map(account => ({ ...account, type: 'costo' }))
+    ];
+
+    // Obtener todos los movimientos del período aprobados y no anulados
+    const { data: movements, error: movementsError } = await supabase
       .from('journal_entry_items')
       .select(`
         id,
         account_id,
         debit,
         credit,
-        journal_entries!inner(id, date, is_adjustment, is_approved, status)
+        journal_entries!inner(id, date, is_approved, status)
       `)
-      .gte('journal_entries.date', periodDetails.start_date)
-      .lte('journal_entries.date', periodDetails.end_date)
+      .gte('journal_entries.date', startDate)
+      .lte('journal_entries.date', endDate)
       .eq('journal_entries.is_approved', true)
       .neq('journal_entries.status', 'voided');
 
     if (movementsError) throw movementsError;
 
-    // Procesar movimientos por cuenta
-    // Crear un mapa de id de cuenta -> cuenta
-    const accountsMap = new Map<string, Account & { balance: number; hasActivity: boolean }>();
+    // Procesar los movimientos para calcular los saldos
+    const accountBalances: { [accountId: string]: number } = {};
     
-    // Inicializar todas las cuentas con saldo cero
-    for (const account of accounts) {
-      accountsMap.set(account.id, {
-        ...account,
-        balance: 0,
-        hasActivity: false
-      });
-    }
+    // Inicializar saldos en 0
+    allAccounts.forEach(account => {
+      accountBalances[account.id] = 0;
+    });
     
-    // Sumar los movimientos por cuenta
-    (allMovements || []).forEach(movement => {
+    // Calcular saldos según los movimientos
+    movements.forEach(movement => {
       const accountId = movement.account_id;
-      const account = accountsMap.get(accountId);
-      
-      if (account) {
-        const debit = new Decimal(movement.debit || 0);
-        const credit = new Decimal(movement.credit || 0);
+      if (accountId in accountBalances) {
+        const debit = parseFloat(movement.debit || '0');
+        const credit = parseFloat(movement.credit || '0');
         
-        // Calcular balance según el tipo de cuenta
-        let delta = 0;
-        if (account.type === 'activo' || account.type === 'gasto' || account.type === 'costo') {
-          // Cuentas de naturaleza deudora: débitos aumentan, créditos disminuyen
-          delta = debit.minus(credit).toNumber();
-        } else {
-          // Cuentas de naturaleza acreedora: créditos aumentan, débitos disminuyen
-          delta = credit.minus(debit).toNumber();
+        // Obtener el tipo de cuenta
+        const account = allAccounts.find(acc => acc.id === accountId);
+        if (account) {
+          // Naturaleza de la cuenta
+          const isDebitType = ['activo', 'gasto', 'costo'].includes(account.type);
+          
+          if (isDebitType) {
+            // Para activos, gastos y costos: débito aumenta, crédito disminuye
+            accountBalances[accountId] += debit - credit;
+          } else {
+            // Para pasivos, patrimonio e ingresos: crédito aumenta, débito disminuye
+            accountBalances[accountId] += credit - debit;
+          }
         }
-        
-        account.balance += delta;
-        account.hasActivity = true;
       }
     });
 
-    // Inicializar estructura de datos financieros
-    const financialData: FinancialData = {
-      assets: [],
-      liabilities: [],
-      equity: [],
-      revenue: [],
-      expenses: [],
-      costs: [],
-      totalAssets: 0,
-      totalLiabilities: 0,
-      totalEquity: 0,
-      totalRevenue: 0,
-      totalExpenses: 0,
-      totalCosts: 0,
-      netIncome: 0,
+    // Construir objetos para los estados financieros
+    const assetAccountsWithBalance = assets.map(account => ({
+      id: account.id,
+      code: account.code,
+      name: account.name,
+      type: 'activo',
+      nature: 'debit',
+      is_active: true,
+      parentId: account.parent_id,
+      balance: accountBalances[account.id] || 0,
+      hasActivity: (movements || []).some(m => m.account_id === account.id)
+    })).filter(account => account.balance !== 0 || account.hasActivity);
+
+    const liabilityAccountsWithBalance = liabilities.map(account => ({
+      id: account.id,
+      code: account.code,
+      name: account.name,
+      type: 'pasivo',
+      nature: 'credit',
+      is_active: true,
+      parentId: account.parent_id,
+      balance: accountBalances[account.id] || 0,
+      hasActivity: (movements || []).some(m => m.account_id === account.id)
+    })).filter(account => account.balance !== 0 || account.hasActivity);
+
+    const equityAccountsWithBalance = equity.map(account => ({
+      id: account.id,
+      code: account.code,
+      name: account.name,
+      type: 'patrimonio',
+      nature: 'credit',
+      is_active: true,
+      parentId: account.parent_id,
+      balance: accountBalances[account.id] || 0,
+      hasActivity: (movements || []).some(m => m.account_id === account.id)
+    })).filter(account => account.balance !== 0 || account.hasActivity);
+
+    const revenueAccountsWithBalance = revenue.map(account => ({
+      id: account.id,
+      code: account.code,
+      name: account.name,
+      type: 'ingreso',
+      nature: 'credit',
+      is_active: true,
+      parentId: account.parent_id,
+      balance: accountBalances[account.id] || 0,
+      hasActivity: (movements || []).some(m => m.account_id === account.id)
+    })).filter(account => account.balance !== 0 || account.hasActivity);
+
+    const expenseAccountsWithBalance = expenses.map(account => ({
+      id: account.id,
+      code: account.code,
+      name: account.name,
+      type: 'gasto',
+      nature: 'debit',
+      is_active: true,
+      parentId: account.parent_id,
+      balance: accountBalances[account.id] || 0,
+      hasActivity: (movements || []).some(m => m.account_id === account.id)
+    })).filter(account => account.balance !== 0 || account.hasActivity);
+
+    const costAccountsWithBalance = costs.map(account => ({
+      id: account.id,
+      code: account.code,
+      name: account.name,
+      type: 'costo',
+      nature: 'debit',
+      is_active: true,
+      parentId: account.parent_id,
+      balance: accountBalances[account.id] || 0,
+      hasActivity: (movements || []).some(m => m.account_id === account.id)
+    })).filter(account => account.balance !== 0 || account.hasActivity);
+
+    // Calcular totales
+    const totalAssets = assetAccountsWithBalance.reduce((sum, account) => sum + account.balance, 0);
+    const totalLiabilities = liabilityAccountsWithBalance.reduce((sum, account) => sum + account.balance, 0);
+    const totalEquity = equityAccountsWithBalance.reduce((sum, account) => sum + account.balance, 0);
+    const totalRevenue = revenueAccountsWithBalance.reduce((sum, account) => sum + account.balance, 0);
+    const totalExpenses = expenseAccountsWithBalance.reduce((sum, account) => sum + account.balance, 0);
+    const totalCosts = costAccountsWithBalance.reduce((sum, account) => sum + account.balance, 0);
+    
+    // Calcular utilidad neta
+    const netIncome = totalRevenue - totalExpenses - totalCosts;
+
+    return {
+      assets: assetAccountsWithBalance,
+      liabilities: liabilityAccountsWithBalance,
+      equity: equityAccountsWithBalance,
+      revenue: revenueAccountsWithBalance,
+      expenses: expenseAccountsWithBalance,
+      costs: costAccountsWithBalance,
+      totalAssets,
+      totalLiabilities,
+      totalEquity,
+      totalRevenue,
+      totalExpenses,
+      totalCosts,
+      netIncome
     };
-
-    // Clasificar cuentas y calcular totales
-    accountsMap.forEach(account => {
-      // Solo incluir cuentas con balance o actividad
-      if (Math.abs(account.balance) > 0.001 || account.hasActivity) {
-        const financialAccount: FinancialAccount = {
-          ...account,
-          balance: Math.abs(account.balance) // Siempre positivo para presentación
-        };
-
-        // Clasificar por tipo de cuenta
-        switch (account.type) {
-          case 'activo':
-            financialData.assets.push(financialAccount);
-            financialData.totalAssets += account.balance;
-            break;
-          case 'pasivo':
-            financialData.liabilities.push(financialAccount);
-            financialData.totalLiabilities += account.balance;
-            break;
-          case 'patrimonio':
-            financialData.equity.push(financialAccount);
-            financialData.totalEquity += account.balance;
-            break;
-          case 'ingreso':
-            financialData.revenue.push(financialAccount);
-            financialData.totalRevenue += account.balance;
-            break;
-          case 'gasto':
-            financialData.expenses.push(financialAccount);
-            financialData.totalExpenses += account.balance;
-            break;
-          case 'costo':
-            financialData.costs.push(financialAccount);
-            financialData.totalCosts += account.balance;
-            break;
-        }
-      }
-    });
-
-    // Calcular utilidad neta (ingresos - gastos - costos)
-    financialData.netIncome = financialData.totalRevenue - financialData.totalExpenses - financialData.totalCosts;
-
-    // Ordenar cuentas por código
-    financialData.assets.sort((a, b) => a.code.localeCompare(b.code));
-    financialData.liabilities.sort((a, b) => a.code.localeCompare(b.code));
-    financialData.equity.sort((a, b) => a.code.localeCompare(b.code));
-    financialData.revenue.sort((a, b) => a.code.localeCompare(b.code));
-    financialData.expenses.sort((a, b) => a.code.localeCompare(b.code));
-    financialData.costs.sort((a, b) => a.code.localeCompare(b.code));
-
-    return financialData;
   } catch (error) {
     console.error('Error obteniendo datos financieros:', error);
     throw error;
