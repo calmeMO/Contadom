@@ -1390,7 +1390,6 @@ export async function reopenFiscalYear(
     if (monthsError) throw monthsError;
     
     if (monthlyPeriods && monthlyPeriods.length > 0) {
-      // Reabrir todos los períodos mensuales
       const { error: reopenMonthsError } = await supabase
         .from('monthly_accounting_periods')
         .update({
@@ -1401,31 +1400,16 @@ export async function reopenFiscalYear(
           reopened_by: userId,
           closed_at: null,
           closed_by: null,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
+          notes: `Reabierto automáticamente por reapertura del año fiscal. Motivo: ${reason}`
         })
         .in('id', monthlyPeriods.map(p => p.id));
         
-      if (reopenMonthsError) {
-        // Si hubo error al reabrir los meses, volver a cerrar el año fiscal
-        await supabase
-          .from('accounting_periods')
-          .update({
-            is_closed: true,
-            is_active: false,
-            closed_at: new Date().toISOString(),
-            closed_by: userId,
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', fiscalYearId);
-          
-        throw new Error(`Error al reabrir períodos mensuales: ${reopenMonthsError.message}`);
-      }
-      
-      console.log(`Reabiertos ${monthlyPeriods.length} períodos mensuales del año fiscal`);
+      if (reopenMonthsError) throw reopenMonthsError;
     }
     
-    console.log(`Año fiscal ${fiscalYear.name} reabierto correctamente`);
-    
+    // Ya no registramos nada en closing_history
+
     return { success: true, error: null };
   } catch (error: any) {
     console.error('Error al reabrir año fiscal:', error);
