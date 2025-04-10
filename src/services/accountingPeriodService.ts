@@ -1258,17 +1258,6 @@ export async function closeFiscalYear(
       };
     }
 
-    // Verificar si la tabla closing_history existe antes de continuar
-    const { data: tableExists, error: tableExistsError } = await supabase
-      .from('information_schema.tables')
-      .select('table_name')
-      .eq('table_schema', 'public')
-      .eq('table_name', 'closing_history')
-      .maybeSingle();
-    
-    // Si hay un error al verificar o la tabla no existe, ignoramos esa parte
-    const closingHistoryExists = !(tableExistsError || !tableExists);
-    
     // 3. Cerrar todos los períodos mensuales que no estén cerrados
     const { data: openMonths, error: openMonthsError } = await supabase
       .from('monthly_accounting_periods_with_users')
