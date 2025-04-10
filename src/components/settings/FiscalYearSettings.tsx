@@ -60,12 +60,13 @@ const formatDateSpanish = (dateString: string): string => {
 };
 
 // Agregar interfaz para extender MonthlyPeriod con fiscal_year
-interface EnhancedMonthlyPeriod extends MonthlyPeriod {
+interface EnhancedMonthlyPeriod extends Omit<MonthlyPeriod, 'fiscal_year'> {
   fiscal_year?: {
     name: string;
     is_closed: boolean;
     is_active: boolean;
   };
+  fiscal_year_id: string;
 }
 
 // Definir nuestra interfaz local para FiscalYear
@@ -116,6 +117,17 @@ export function FiscalYearSettings() {
     });
   }, []);
 
+  // Asegurar que el scroll esté siempre disponible
+  useEffect(() => {
+    // Forzar el scroll a estar disponible siempre
+    document.body.style.overflowY = 'scroll';
+    
+    return () => {
+      // Restaurar el comportamiento por defecto cuando el componente se desmonte
+      document.body.style.overflowY = '';
+    };
+  }, []);
+
   async function getCurrentUser() {
     try {
       const { data: { user } } = await supabase.auth.getUser();
@@ -151,12 +163,7 @@ export function FiscalYearSettings() {
       
       setFiscalYears(processedData);
       
-      // Expandir automáticamente solo el año fiscal que tiene el período del mes actual
-      const currentDate = new Date();
-      const currentYear = currentDate.getFullYear();
-      const currentMonth = currentDate.getMonth() + 1; // 1-12
-      
-      // Obtener períodos mensuales para todos los años
+      // Obtener períodos mensuales para todos los años (pero sin desplegar automáticamente)
       const { data: allMonthlyPeriods, error: monthlyError } = await supabase
         .from('monthly_accounting_periods')
         .select('*, fiscal_year:fiscal_year_id(name, is_closed, is_active)')
@@ -164,18 +171,8 @@ export function FiscalYearSettings() {
         
       if (monthlyError) throw monthlyError;
       
-      // Encontrar el período actual y su año fiscal
-      const currentPeriod = allMonthlyPeriods?.find(period => {
-        return period.year === currentYear && period.month === currentMonth;
-      });
-      
-      if (currentPeriod) {
-        // Expandir el año fiscal que contiene el período actual
-        setExpandedYears([currentPeriod.fiscal_year_id]);
-      } else if (processedData.length > 0) {
-        // Si no hay un período actual, expandir el año fiscal más reciente
-        setExpandedYears([processedData[0].id]);
-      }
+      // No expandir automáticamente ningún año fiscal cuando se carga la página
+      // Solo mantener los que ya estaban expandidos (si los hay)
       
       // Cargar estadísticas para los períodos
       await loadPeriodStats(processedData);
@@ -232,12 +229,37 @@ export function FiscalYearSettings() {
     }
   }
 
+  // Función para restaurar el scroll en caso de que esté bloqueado
+  const ensureScrollIsEnabled = () => {
+    // Forzar un reflow para asegurar que los cambios se aplican correctamente
+    setTimeout(() => {
+      document.body.style.overflow = '';
+      document.documentElement.style.overflow = '';
+      document.body.style.removeProperty('overflow');
+      document.documentElement.style.removeProperty('overflow');
+    }, 50);
+  };
+
   const toggleYearExpansion = (yearId: string) => {
+    // Guardar la posición actual del scroll antes de expandir
+    const scrollPosition = window.scrollY;
+    
     setExpandedYears(prev => 
       prev.includes(yearId) 
         ? prev.filter(id => id !== yearId) 
         : [...prev, yearId]
     );
+    
+    // Restaurar la posición del scroll después de que el DOM se actualice
+    setTimeout(() => {
+      window.scrollTo({
+        top: scrollPosition,
+        behavior: 'instant'
+      });
+      
+      // Asegurar que el scroll esté habilitado
+      ensureScrollIsEnabled();
+    }, 10);
   };
 
   const handleCloseYear = async (year: LocalFiscalYear) => {
@@ -255,13 +277,65 @@ export function FiscalYearSettings() {
       }
       
       // Cerrar año fiscal
-      const { success, error } = await closeFiscalYear(year.id, user.id);
-      
-      if (!success) {
-        throw new Error(error || 'Error al cerrar el año fiscal');
+      try {
+        const { success, error } = await closeFiscalYear(year.id, user.id);
+        
+        if (!success) {
+          throw new Error(error || 'Error al cerrar el año fiscal');
+        }
+        
+        toast.success(`Año fiscal ${year.name} cerrado correctamente junto con sus períodos mensuales`);
+      } catch (specificError: any) {
+        // Verificar si es el error específico de la tabla closing_history
+        if (specificError.message && specificError.message.includes('closing_history does not exist')) {
+          console.warn('La tabla closing_history no existe, continuando de todos modos...');
+          
+          // Actualizamos manualmente el estado del año fiscal como cerrado
+          const { error: manualCloseError } = await supabase
+            .from('accounting_periods')
+            .update({
+              is_closed: true,
+              is_active: false,
+              closed_at: new Date().toISOString(),
+              closed_by: user.id,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', year.id);
+            
+          if (manualCloseError) {
+            throw new Error(`Error al cerrar manualmente el año fiscal: ${manualCloseError.message}`);
+          }
+          
+          // Cerrar períodos mensuales manualmente
+          const { data: openMonths, error: openMonthsError } = await supabase
+            .from('monthly_accounting_periods')
+            .select('id')
+            .eq('fiscal_year_id', year.id)
+            .eq('is_closed', false);
+            
+          if (!openMonthsError && openMonths && openMonths.length > 0) {
+            const { error: closeMonthsError } = await supabase
+              .from('monthly_accounting_periods')
+              .update({
+                is_closed: true,
+                is_active: false,
+                closed_at: new Date().toISOString(),
+                closed_by: user.id,
+                updated_at: new Date().toISOString()
+              })
+              .in('id', openMonths.map(m => m.id));
+              
+            if (closeMonthsError) {
+              throw new Error(`Error al cerrar manualmente períodos mensuales: ${closeMonthsError.message}`);
+            }
+          }
+          
+          toast.success(`Año fiscal ${year.name} cerrado correctamente junto con sus períodos mensuales`);
+        } else {
+          // Si es otro tipo de error, lo propagamos
+          throw specificError;
+        }
       }
-      
-      toast.success(`Año fiscal ${year.name} cerrado correctamente junto con sus períodos mensuales`);
       
       // Refrescar datos
       fetchData();
@@ -381,7 +455,7 @@ export function FiscalYearSettings() {
   };
 
   // Función para cerrar un período mensual individual
-  const handleClosePeriod = async (period: MonthlyPeriod) => {
+  const handleClosePeriod = async (period: EnhancedMonthlyPeriod) => {
     if (!user?.id || !period.id) {
       toast.error('Debes iniciar sesión para realizar esta acción');
       return;
@@ -416,7 +490,7 @@ export function FiscalYearSettings() {
   };
 
   // Función para activar/desactivar un período mensual individual
-  const handleTogglePeriodActive = async (period: MonthlyPeriod, activate: boolean) => {
+  const handleTogglePeriodActive = async (period: EnhancedMonthlyPeriod, activate: boolean) => {
     if (!user?.id || !period.id) {
       toast.error('Debes iniciar sesión para realizar esta acción');
       return;
@@ -613,19 +687,29 @@ export function FiscalYearSettings() {
       
       // Generar automáticamente los períodos mensuales
       if (data) {
-        // Llamar al servicio para inicializar períodos mensuales
-        await handleInitializeMonthlyPeriods(data.id);
+        // Cerrar el modal antes de realizar operaciones adicionales
+        handleCloseCreateModal();
         
-        // Refrescar los datos
-        fetchData();
-        
-        // Cerrar el modal y mostrar mensaje de éxito
-        setShowCreateModal(false);
-        toast.success('Año fiscal creado exitosamente');
+        // Pequeño retraso para asegurar que el DOM se actualiza y se restaura el scroll
+        setTimeout(async () => {
+          // Llamar al servicio para inicializar períodos mensuales
+          await handleInitializeMonthlyPeriods(data.id);
+          
+          // Refrescar los datos (sin expandir automáticamente el nuevo año fiscal)
+          await fetchData();
+          
+          // Asegurar que el scroll está disponible
+          ensureScrollIsEnabled();
+          
+          toast.success('Año fiscal creado exitosamente');
+        }, 100);
       }
     } catch (error) {
       console.error('Error al crear año fiscal:', error);
       toast.error('Error al crear el año fiscal');
+      
+      // Asegurar que el scroll se restaura incluso en caso de error
+      ensureScrollIsEnabled();
     } finally {
       setLoading(false);
     }
@@ -641,14 +725,19 @@ export function FiscalYearSettings() {
 
       if (error) {
         console.error('Error al obtener configuración de la empresa:', error);
+        // Si hay un error, asumimos que el tipo fiscal no está configurado
+        setCompanyFiscalYearType(null);
         return;
       }
 
       if (data && data.fiscal_year_type) {
         setCompanyFiscalYearType(data.fiscal_year_type as FiscalYearType);
+      } else {
+        setCompanyFiscalYearType(null);
       }
     } catch (error) {
       console.error('Error al obtener tipo de año fiscal de la empresa:', error);
+      setCompanyFiscalYearType(null);
     }
   }
 
@@ -783,7 +872,7 @@ export function FiscalYearSettings() {
     }
     
     return (
-      <div className="overflow-x-auto w-full">
+      <div className="w-full">
         <table className="min-w-full divide-y divide-gray-200">
           <thead className="bg-gray-50">
             <tr>
@@ -855,7 +944,10 @@ export function FiscalYearSettings() {
                           <>
                             {period.is_active ? (
                               <button
-                                onClick={() => handleTogglePeriodActive(period, false)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleTogglePeriodActive(period, false);
+                                }}
                                 disabled={processingPeriodId === period.id}
                                 className="text-yellow-600 hover:text-yellow-900 ml-2 px-2 py-1 text-xs rounded hover:bg-yellow-50 transition-colors"
                               >
@@ -863,7 +955,10 @@ export function FiscalYearSettings() {
                               </button>
                             ) : (
                               <button
-                                onClick={() => handleTogglePeriodActive(period, true)}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleTogglePeriodActive(period, true);
+                                }}
                                 disabled={processingPeriodId === period.id}
                                 className="text-green-600 hover:text-green-900 ml-2 px-2 py-1 text-xs rounded hover:bg-green-50 transition-colors"
                               >
@@ -871,7 +966,10 @@ export function FiscalYearSettings() {
                               </button>
                             )}
                             <button
-                              onClick={() => handleClosePeriod(period)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleClosePeriod(period);
+                              }}
                               disabled={processingPeriodId === period.id}
                               className="text-red-600 hover:text-red-900 ml-2 px-2 py-1 text-xs rounded hover:bg-red-50 transition-colors"
                             >
@@ -891,6 +989,29 @@ export function FiscalYearSettings() {
     );
   };
 
+  // Controlar la apertura del modal de creación
+  const handleOpenCreateModal = () => {
+    initializeFormData();
+    setShowCreateModal(true);
+  };
+
+  // Controlar el cierre del modal de creación
+  const handleCloseCreateModal = () => {
+    setShowCreateModal(false);
+    ensureScrollIsEnabled();
+  };
+
+  // Controlar la apertura del modal de soporte
+  const handleOpenSupportModal = () => {
+    setShowSupportModal(true);
+  };
+
+  // Controlar el cierre del modal de soporte
+  const handleCloseSupportModal = () => {
+    setShowSupportModal(false);
+    ensureScrollIsEnabled();
+  };
+
   if (loading && fiscalYears.length === 0) {
     return (
       <div className="animate-pulse">
@@ -902,29 +1023,44 @@ export function FiscalYearSettings() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-20 min-h-[100vh]">
       <div className="flex justify-between items-center flex-wrap gap-2">
         <h2 className="text-xl font-semibold text-gray-900">Gestión de Años Fiscales y Períodos</h2>
         <div className="flex space-x-2">
           <button
-            onClick={() => setShowSupportModal(true)}
+            onClick={handleOpenSupportModal}
             className="inline-flex items-center px-3 py-2 border border-gray-300 text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
           >
             <LifeBuoy className="mr-1 h-4 w-4" />
             Soporte
           </button>
           <button
-            onClick={() => {
-              initializeFormData();
-              setShowCreateModal(true);
-            }}
-            className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            onClick={handleOpenCreateModal}
+            disabled={!companyFiscalYearType}
+            className="inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             <Plus className="mr-1 h-4 w-4" />
             Nuevo Año Fiscal
           </button>
         </div>
       </div>
+
+      {/* Mensaje informativo cuando no hay tipo de año fiscal configurado */}
+      {!companyFiscalYearType && (
+        <div className="bg-yellow-50 border-l-4 border-yellow-400 p-4 mb-6 rounded-md">
+          <div className="flex">
+            <div className="flex-shrink-0">
+              <AlertCircle className="h-5 w-5 text-yellow-400" />
+            </div>
+            <div className="ml-3">
+              <p className="text-sm text-yellow-700">
+                No se puede crear un año fiscal hasta que se defina el tipo de año fiscal en la configuración de la empresa.
+                Por favor, configure el tipo de año fiscal en la sección de Configuración de la Empresa.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mensaje informativo sobre períodos cerrados */}
       <div className="bg-blue-50 border-l-4 border-blue-400 p-4 mb-6 rounded-md">
@@ -951,15 +1087,18 @@ export function FiscalYearSettings() {
               Crea un nuevo año fiscal para comenzar a gestionar tus períodos contables.
             </p>
             <button
-              onClick={() => {
-                initializeFormData();
-                setShowCreateModal(true);
-              }}
-              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+              onClick={handleOpenCreateModal}
+              disabled={!companyFiscalYearType}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
             >
               <Plus className="mr-2 h-4 w-4" />
               Crear Año Fiscal
             </button>
+            {!companyFiscalYearType && (
+              <p className="text-xs text-yellow-600 mt-2">
+                Primero debe configurar el tipo de año fiscal en la configuración de la empresa.
+              </p>
+            )}
           </div>
         </div>
       ) : (
@@ -1057,7 +1196,7 @@ export function FiscalYearSettings() {
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setShowSupportModal(true);
+                                  handleOpenSupportModal();
                                 }}
                                 className="px-2 py-1 text-xs font-medium rounded bg-blue-100 text-blue-800 hover:bg-blue-200"
                               >
@@ -1075,7 +1214,10 @@ export function FiscalYearSettings() {
                               {!year.has_monthly_periods && !loading ? (
                                 <div className="text-center py-4">
                                   <button
-                                    onClick={() => handleInitializeMonthlyPeriods(year.id)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleInitializeMonthlyPeriods(year.id);
+                                    }}
                                     disabled={processingYearId === year.id || year.is_closed}
                                     className="px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-500 hover:bg-blue-700 disabled:opacity-50"
                                   >
@@ -1101,7 +1243,7 @@ export function FiscalYearSettings() {
       {/* Modal para crear año fiscal */}
       <Modal
         title="Crear Nuevo Año Fiscal"
-        onClose={() => setShowCreateModal(false)}
+        onClose={handleCloseCreateModal}
         isOpen={showCreateModal}
       >
         <form onSubmit={handleSubmitCreateForm} className="space-y-4">
@@ -1182,7 +1324,7 @@ export function FiscalYearSettings() {
           <div className="flex justify-end mt-6 space-x-3">
             <button
               type="button"
-              onClick={() => setShowCreateModal(false)}
+              onClick={handleCloseCreateModal}
               className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
             >
               Cancelar
@@ -1201,7 +1343,7 @@ export function FiscalYearSettings() {
       {/* Modal para contactar a soporte */}
       <Modal
         title="Contactar a Soporte"
-        onClose={() => setShowSupportModal(false)}
+        onClose={handleCloseSupportModal}
         isOpen={showSupportModal}
       >
         <div className="space-y-4 p-2">
@@ -1259,7 +1401,7 @@ export function FiscalYearSettings() {
           <div className="flex justify-end mt-6">
             <button
               type="button"
-              onClick={() => setShowSupportModal(false)}
+              onClick={handleCloseSupportModal}
               className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
             >
               Entendido
