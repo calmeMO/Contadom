@@ -213,7 +213,7 @@ export async function validateDateInPeriod(date: string, periodId: string): Prom
   try {
     const { data, error } = await supabase
       .from('monthly_accounting_periods')
-      .select('start_date, end_date, name, is_closed')
+      .select('start_date, end_date, name, is_closed, is_active')
       .eq('id', periodId)
       .single();
     
@@ -226,25 +226,50 @@ export async function validateDateInPeriod(date: string, periodId: string): Prom
     if (data.is_closed) {
       return { valid: false, message: 'El período contable está cerrado' };
     }
+
+    if (!data.is_active) {
+      return { valid: false, message: 'El período contable no está activo' };
+    }
     
-    const startDate = new Date(data.start_date);
-    const endDate = new Date(data.end_date);
-    const checkDate = new Date(date);
+    // Verificamos fecha con respecto al período para mostrar advertencias,
+    // pero permitimos fechas fuera del rango
+    const entryDate = new Date(date);
+    const periodStartDate = new Date(data.start_date);
+    const periodEndDate = new Date(data.end_date);
     
-    // Normalizar fechas a medianoche para comparación
-    startDate.setHours(0, 0, 0, 0);
-    endDate.setHours(23, 59, 59, 999);
-    checkDate.setHours(12, 0, 0, 0);
+    // Formatear fechas para mensajes
+    const formatDateEs = (date: Date) => {
+      return date.toLocaleDateString('es-ES', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric'
+      });
+    };
     
-    if (checkDate < startDate || checkDate > endDate) {
-      // Formatear fechas en formato español
-      const formattedStartDate = format(startDate, 'dd/MM/yyyy', { locale: es });
-      const formattedEndDate = format(endDate, 'dd/MM/yyyy', { locale: es });
-      const formattedCheckDate = format(checkDate, 'dd/MM/yyyy', { locale: es });
-      
-      return { 
-        valid: false, 
-        message: `La fecha ${formattedCheckDate} debe estar dentro del período ${data.name} (${formattedStartDate} - ${formattedEndDate})` 
+    // Verificar que no sea fecha futura respecto a hoy
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    if (entryDate > today) {
+      return {
+        valid: false,
+        message: 'No se pueden registrar asientos con fechas futuras'
+      };
+    }
+    
+    // Advertencia si la fecha es anterior al inicio del período
+    if (entryDate < periodStartDate) {
+      return {
+        valid: true, // Ahora es válido con advertencia
+        message: `La fecha seleccionada (${formatDateEs(entryDate)}) es anterior al inicio del período ${data.name} (${formatDateEs(periodStartDate)}). Considere usar el período correspondiente.`
+      };
+    }
+    
+    // Advertencia si la fecha es posterior al fin del período
+    if (entryDate > periodEndDate) {
+      return {
+        valid: true, // Ahora es válido con advertencia
+        message: `La fecha seleccionada (${formatDateEs(entryDate)}) es posterior al fin del período ${data.name} (${formatDateEs(periodEndDate)}). Considere seleccionar un período más reciente.`
       };
     }
     
@@ -393,7 +418,7 @@ export async function getJournalEntry(id: string): Promise<{
     // Obtener el asiento
     const { data: entry, error: entryError } = await supabase
       .from('journal_entries')
-      .select('*')
+      .select('*, monthly_period:monthly_period_id(id, name, fiscal_year_id, start_date, end_date, is_closed)')
       .eq('id', id)
       .single();
       
@@ -409,19 +434,59 @@ export async function getJournalEntry(id: string): Promise<{
     
     console.log('✅ Cabecera de asiento obtenida:', entry);
 
-    // Obtener las líneas del asiento
-    console.log('⏳ Consultando líneas del asiento de journal_entry_items...');
+    // Obtener las líneas del asiento con información de cuentas
+    console.log('⏳ Consultando líneas del asiento en journal_entry_items...');
     const { data: items, error: itemsError } = await supabase
       .from('journal_entry_items')
-      .select('*, account:accounts(id, code, name, type, nature)')
+      .select(`
+        *,
+        account:account_id(
+          id, 
+          code, 
+          name, 
+          type, 
+          nature, 
+          parent_id
+        )
+      `)
       .eq('journal_entry_id', id)
       .order('id');
 
     if (itemsError) {
       console.error('❌ Error al obtener líneas del asiento:', itemsError);
-      // A diferencia de antes, no lanzamos error aquí para que al menos se devuelva la cabecera
       console.warn('⚠️ Se devolverá solo la cabecera sin líneas');
       return { entry, items: [], error: null };
+    }
+    
+    // Intentamos una segunda consulta si no hay información de cuentas
+    if (items && items.length > 0 && items.some(item => !item.account)) {
+      console.warn('⚠️ Algunas líneas no tienen información de cuenta, intentando consulta alternativa');
+      
+      // Obtenemos los IDs de cuentas faltantes
+      const accountIds = items
+        .filter(item => !item.account && item.account_id)
+        .map(item => item.account_id);
+      
+      if (accountIds.length > 0) {
+        const { data: accountsData } = await supabase
+          .from('accounts')
+          .select('id, code, name, type, nature, parent_id')
+          .in('id', accountIds);
+        
+        if (accountsData && accountsData.length > 0) {
+          console.log('✅ Se encontraron datos adicionales de cuentas:', accountsData.length);
+          
+          // Actualizamos los items con la información de cuentas
+          items.forEach(item => {
+            if (!item.account && item.account_id) {
+              const accountData = accountsData.find(acc => acc.id === item.account_id);
+              if (accountData) {
+                item.account = accountData;
+              }
+            }
+          });
+        }
+      }
     }
     
     // Log para depuración
@@ -430,7 +495,8 @@ export async function getJournalEntry(id: string): Promise<{
     } else {
       console.log(`✅ Se encontraron ${items.length} líneas para el asiento ID:`, id);
       items.forEach((item, index) => {
-        console.log(`Línea ${index + 1}:`, item);
+        console.log(`Línea ${index + 1}: Cuenta ${item.account_id} - ${item.account?.code || 'Sin código'} ${item.account?.name || 'Sin nombre'}`);
+        console.log(`   Debit: ${item.debit}, Credit: ${item.credit}`);
       });
     }
     

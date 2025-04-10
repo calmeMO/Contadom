@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'react-toastify';
-import { Loader2, FileDown, ChevronDown, ChevronUp } from 'lucide-react';
+import { Loader2, FileDown, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import * as XLSX from 'xlsx';
 
@@ -305,7 +305,7 @@ const GeneralLedger: React.FC = () => {
         .eq('monthly_period_id', selectedMonth)
         .eq('status', 'voided');
         
-      if (voidedError) throw voidedError;
+      if (voidedError) throw new Error(`Error al verificar asientos anulados: ${voidedError.message}`);
       
       // Log para confirmar los asientos anulados
       if (voidedEntries && voidedEntries.length > 0) {
@@ -320,7 +320,7 @@ const GeneralLedger: React.FC = () => {
         .select('id, code, name, type, nature, parent_id, is_parent, is_active')
         .order('code');
 
-      if (accountsError) throw accountsError;
+      if (accountsError) throw new Error(`Error al obtener cuentas: ${accountsError.message}`);
       
       // Incluir todas las cuentas para la jerarquía, pero solo mostrar las activas en el cálculo
       const allAccountsData: Account[] = accountsData || [];
@@ -357,9 +357,9 @@ const GeneralLedger: React.FC = () => {
           .eq('journal_entries.is_approved', true)
           .neq('journal_entries.status', 'voided');
           
-        if (previousItemsError) throw previousItemsError;
+        if (previousItemsError) throw new Error(`Error al obtener asientos anteriores: ${previousItemsError.message}`);
         
-        // Procesar los asientos y calcular saldos iniciales por cuenta
+        // Procesar los asientos y calcular saldos iniciales por cuenta teniendo en cuenta la naturaleza
         if (allPreviousItems && allPreviousItems.length > 0) {
           allPreviousItems.forEach(item => {
             const accountId = item.account_id;
@@ -367,7 +367,22 @@ const GeneralLedger: React.FC = () => {
               initialBalancesByAccount[accountId] = 0;
             }
             
-            initialBalancesByAccount[accountId] += (item.debit || 0) - (item.credit || 0);
+            // Buscar la cuenta en los datos obtenidos previamente
+            const accountData = allAccountsData.find(acc => acc.id === accountId);
+            if (!accountData) return; // Ignorar si no se encuentra la cuenta
+            
+            // Calcular el saldo según la naturaleza de la cuenta
+            const isDebit = accountData.nature === 'deudora';
+            const debitAmount = parseFloat(item.debit) || 0;
+            const creditAmount = parseFloat(item.credit) || 0;
+            
+            if (isDebit) {
+              // Para cuentas deudoras: débitos suman, créditos restan
+              initialBalancesByAccount[accountId] += debitAmount - creditAmount;
+            } else {
+              // Para cuentas acreedoras: créditos suman, débitos restan
+              initialBalancesByAccount[accountId] += creditAmount - debitAmount;
+            }
           });
         }
       }
@@ -386,7 +401,7 @@ const GeneralLedger: React.FC = () => {
         .eq('journal_entries.is_approved', true)
         .neq('journal_entries.status', 'voided');
         
-      if (currentItemsError) throw currentItemsError;
+      if (currentItemsError) throw new Error(`Error al obtener asientos del mes actual: ${currentItemsError.message}`);
       
       // Log para depuración
       console.log('Asientos del mes actual:', allCurrentItems);
@@ -406,8 +421,8 @@ const GeneralLedger: React.FC = () => {
             creditsByAccount[accountId] = 0;
           }
           
-          debitsByAccount[accountId] += (item.debit || 0);
-          creditsByAccount[accountId] += (item.credit || 0);
+          debitsByAccount[accountId] += parseFloat(item.debit) || 0;
+          creditsByAccount[accountId] += parseFloat(item.credit) || 0;
         });
       }
       
@@ -422,7 +437,7 @@ const GeneralLedger: React.FC = () => {
           if (account.is_active && !account.is_parent) {
             // Asignar saldo inicial (ajustando según la naturaleza de la cuenta)
             let initialBalance = initialBalancesByAccount[account.id] || 0;
-            if (account.nature === 'credit') {
+            if (account.nature === 'acreedora') {
               initialBalance = -initialBalance;
             }
             account.initial_balance = initialBalance;
@@ -445,6 +460,26 @@ const GeneralLedger: React.FC = () => {
       // 7. Calcular saldos finales y propagar hacia arriba en la jerarquía
       calculateFinalBalances(hierarchy);
       
+      // Verificar equilibrio contable
+      let totalDebits = 0;
+      let totalCredits = 0;
+      
+      // Calcular totales solo para cuentas de movimiento
+      const flatAccounts = flattenHierarchy(hierarchy);
+      flatAccounts.forEach(account => {
+        if (!account.is_parent) {
+          totalDebits += account.debits;
+          totalCredits += account.credits;
+        }
+      });
+      
+      // Verificar si hay diferencia entre débitos y créditos
+      const difference = Math.abs(totalDebits - totalCredits);
+      if (difference > 0.01) {
+        console.warn(`El libro mayor no está equilibrado. Diferencia: ${difference.toFixed(2)}`);
+        toast.warning(`Advertencia: Los débitos y créditos no están equilibrados. Diferencia: ${difference.toFixed(2)}`);
+      }
+      
       // 8. Actualizar estado con la jerarquía
       setHierarchicalData(hierarchy);
       
@@ -453,6 +488,7 @@ const GeneralLedger: React.FC = () => {
       setLedgerData(flattenedData);
       
     } catch (error: any) {
+      console.error('Error en loadLedgerData:', error);
       toast.error(`Error al cargar datos del libro mayor: ${error.message}`);
       // Limpiar datos en caso de error
       setLedgerData([]);
@@ -476,7 +512,7 @@ const GeneralLedger: React.FC = () => {
       }
       
       // Calcular saldo final según la naturaleza de la cuenta
-      if (account.nature === 'debit') {
+      if (account.nature === 'deudora') {
         // Para cuentas deudoras, el saldo final se calcula: Inicial + Débitos - Créditos
         account.final_balance = account.initial_balance + account.debits - account.credits;
       } else {
@@ -485,8 +521,8 @@ const GeneralLedger: React.FC = () => {
       }
 
       // Verificar si el saldo final debe mostrarse como positivo según la naturaleza de la cuenta
-      if ((account.nature === 'debit' && account.final_balance < 0) || 
-          (account.nature === 'credit' && account.final_balance > 0)) {
+      if ((account.nature === 'deudora' && account.final_balance < 0) || 
+          (account.nature === 'acreedora' && account.final_balance > 0)) {
         console.log(`Cuenta ${account.code} ${account.name} tiene saldo anormal: ${account.final_balance}`);
       }
     }
@@ -586,10 +622,53 @@ const GeneralLedger: React.FC = () => {
     }
 
     try {
-      // Preparar los datos para Excel
-      const excelData = ledgerData.map(entry => ({
+      // Obtener información del período seleccionado
+      const selectedMonthInfo = months.find(m => m.id === selectedMonth);
+      const selectedFiscalYearInfo = fiscalYears.find(y => y.id === selectedFiscalYear);
+      
+      // Obtener todas las cuentas para la exportación, incluyendo las cuentas padre
+      const allDataForExport = hierarchicalData.slice();
+      const fullDataFlattened: Array<{
+        account_id: string;
+        account_code: string;
+        account_name: string;
+        initial_balance: number;
+        debits: number;
+        credits: number;
+        final_balance: number;
+        is_parent: boolean;
+        level: number;
+        indentation: string;
+      }> = [];
+      
+      // Función recursiva para aplanar la jerarquía completa
+      const flattenAllAccounts = (accounts: HierarchicalAccount[], level = 0) => {
+        accounts.forEach(account => {
+          fullDataFlattened.push({
+            account_id: account.id,
+            account_code: account.code,
+            account_name: account.name,
+            initial_balance: account.initial_balance,
+            debits: account.debits,
+            credits: account.credits,
+            final_balance: account.final_balance,
+            is_parent: account.is_parent,
+            level: level,
+            indentation: '  '.repeat(level)
+          });
+          
+          if (account.children.length > 0) {
+            flattenAllAccounts(account.children, level + 1);
+          }
+        });
+      };
+      
+      flattenAllAccounts(allDataForExport);
+      
+      // Preparar los datos para Excel con formato mejorado
+      const excelData = fullDataFlattened.map(entry => ({
         'Código': entry.account_code,
-        'Cuenta': `${entry.indentation || ''}${entry.account_name}`,
+        'Cuenta': `${entry.indentation}${entry.account_name}`,
         'Balance Inicial': entry.initial_balance,
         'Débitos': entry.debits,
         'Créditos': entry.credits,
@@ -597,27 +676,81 @@ const GeneralLedger: React.FC = () => {
       }));
 
       // Crear libro de trabajo
-      const worksheet = XLSX.utils.json_to_sheet(excelData);
       const workbook = XLSX.utils.book_new();
+      
+      // Crear hoja para incluir cabecera
+      const worksheet = XLSX.utils.aoa_to_sheet([
+        [`LIBRO MAYOR - ${selectedMonthName}`],
+        [`Año Fiscal: ${selectedFiscalYearInfo?.name || 'No especificado'}`],
+        [`Período: ${selectedMonthName || 'No especificado'}`]
+      ]);
+      
+      // Agregar datos del libro mayor a partir de la fila 5 (dejando espacio para la cabecera)
+      XLSX.utils.sheet_add_json(worksheet, excelData, { origin: 'A5' });
+      
+      // Agregar información del período
+      workbook.Props = {
+        Title: `Libro Mayor - ${selectedMonthName}`,
+        Subject: 'Reporte Contable',
+        Author: 'Sistema Contadom',
+        CreatedDate: new Date()
+      };
+      
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Libro Mayor');
 
-      // Ajustar estilos y anchos de columna
+      // Aplicar estilos y formatos mejorados
+      // Ajustar anchos de columna para mejor visualización
       const columnWidths = [
         { wch: 15 }, // Código
-        { wch: 40 }, // Cuenta
-        { wch: 15 }, // Balance Inicial
-        { wch: 15 }, // Débitos
-        { wch: 15 }, // Créditos
-        { wch: 15 }  // Saldo Final
+        { wch: 50 }, // Cuenta
+        { wch: 18 }, // Balance Inicial
+        { wch: 18 }, // Débitos
+        { wch: 18 }, // Créditos
+        { wch: 18 }  // Saldo Final
       ];
       worksheet['!cols'] = columnWidths;
-
-      // Generar el archivo
+      
+      // Formatear las celdas para que muestren números con formato de moneda
+      // Esto se hace configurando el tipo de celda para las columnas numéricas
+      const ref = worksheet['!ref'];
+      if (ref) {
+        const range = XLSX.utils.decode_range(ref);
+        // Empezar desde la fila 6 (la fila 5 tiene los encabezados de columna)
+        for (let C = 2; C <= 5; ++C) {
+          for (let R = 6; R <= range.e.r; ++R) {
+            const cellAddress = { c: C, r: R };
+            const cellRef = XLSX.utils.encode_cell(cellAddress);
+            if (!worksheet[cellRef]) continue;
+            
+            // Configurar formato de número para moneda
+            worksheet[cellRef].z = '"$"#,##0.00_);("$"#,##0.00)';
+          }
+        }
+        
+        // Dar formato a la cabecera
+        worksheet['A1'].s = { font: { bold: true, sz: 16 } };
+        worksheet['A2'].s = { font: { bold: true, sz: 12 } };
+        worksheet['A3'].s = { font: { bold: true, sz: 12 } };
+        
+        // Dar formato a los encabezados de columna
+        for (let C = 0; C <= 5; ++C) {
+          const headerCell = XLSX.utils.encode_cell({ c: C, r: 4 });
+          if (worksheet[headerCell]) {
+            worksheet[headerCell].s = { 
+              font: { bold: true },
+              fill: { fgColor: { rgb: "D3D3D3" } }
+            };
+          }
+        }
+      }
+      
+      // Generar el archivo con nombre descriptivo
       const fileName = `Libro_Mayor_${selectedMonthName.replace(/\s+/g, '_')}.xlsx`;
       XLSX.writeFile(workbook, fileName);
 
       toast.success(`Archivo ${fileName} generado correctamente`);
     } catch (error: any) {
+      console.error('Error al exportar a Excel:', error);
       toast.error(`Error al exportar a Excel: ${error.message}`);
     }
   };

@@ -324,21 +324,35 @@ export default function Journal() {
       console.log('✅ Datos de cabecera del asiento:', entry);
       console.log('✅ Líneas del asiento (cantidad):', items?.length || 0);
       
-      // Cargar datos en el estado
+      if (!items || items.length === 0) {
+        console.warn('⚠️ No se encontraron líneas para este asiento');
+        toast.warning('No se encontraron líneas de detalle para este asiento');
+      } else {
+        console.log(`✅ Se encontraron ${items.length} líneas para el asiento`);
+        items.forEach((item, index) => {
+          console.log(`  Línea ${index + 1}:`, item);
+          console.log(`    Cuenta: ${item.account_id}, Débito: ${item.debit}, Crédito: ${item.credit}`);
+        });
+      }
+      
+      // Establecer el modo antes de cargar los datos
+      setModalMode('view');
+      
+      // Cargar directamente los datos en el estado
       setCurrentEntry(entry);
       setCurrentEntryItems(items || []);
-      
-      // Configurar modo visualización
-      setModalMode('view');
       
       // Mostrar modal
       setModalVisible(true);
       
+      // Finalizar loading después de un breve tiempo para asegurar que el modal se muestre correctamente
+      setTimeout(() => {
+        setLoading(false);
+      }, 200);
+      
     } catch (error: any) {
       console.error('❌ Error no controlado al cargar asiento:', error);
       toast.error(`Error: ${error.message || 'No se pudo cargar el asiento'}`);
-    } finally {
-      // Finalizar loading
       setLoading(false);
     }
   };
@@ -353,8 +367,9 @@ export default function Journal() {
     if (period.is_closed || !period.is_active) return true;
     
     // Verificar además el estado del año fiscal asociado
-    // @ts-ignore - En la consulta extendida con join sí tenemos fiscal_year
+    // @ts-ignore - En la consulta extendida con join sí tenemos la propiedad fiscal_year
     const fiscalYear = period.fiscal_year;
+    // @ts-ignore - fiscal_year es un objeto con propiedades is_closed e is_active
     if (fiscalYear && (fiscalYear.is_closed || !fiscalYear.is_active)) return true;
     
     return false;
@@ -433,21 +448,24 @@ export default function Journal() {
         });
       }
       
-      // Cargar datos en el estado
+      // Establecer el modo de edición según tipo de asiento
+      setModalMode(entry.is_adjustment ? 'edit-adjustment' : 'edit');
+      
+      // Cargar directamente los datos en el estado
       setCurrentEntry(entry);
       setCurrentEntryItems(items || []);
-      
-      // Configurar modo edición según tipo de asiento
-      setModalMode(entry.is_adjustment ? 'edit-adjustment' : 'edit');
       
       // Mostrar modal
       setModalVisible(true);
       
+      // Finalizar loading después de un breve tiempo
+      setTimeout(() => {
+        setLoading(false);
+      }, 200);
+      
     } catch (error: any) {
       console.error('❌ Error no controlado al editar asiento:', error);
       toast.error(`Error: ${error.message || 'No se pudo cargar el asiento para editar'}`);
-    } finally {
-      // Finalizar loading
       setLoading(false);
     }
   };
@@ -671,19 +689,40 @@ export default function Journal() {
 
   // Manejar el cierre del modal
   const handleModalCancel = () => {
+    console.log('Cerrando modal y limpiando estado...');
+    
+    // Primero ocultar el modal
     setModalVisible(false);
-    setCurrentEntry(null);
-    setCurrentEntryItems([]);
+    
+    // Luego limpiar el estado con un pequeño retraso
+    // para evitar problemas de renderizado
+    setTimeout(() => {
+      setCurrentEntry(null);
+      setCurrentEntryItems([]);
+      // Reiniciar el modo del modal para próxima apertura
+      setModalMode('create');
+    }, 300);
   };
 
   // Manejar la finalización del formulario
   const handleFormFinish = (entryId: string | null) => {
+    console.log('Formulario finalizado, ID resultante:', entryId);
+    
+    // Primero ocultar el modal
     setModalVisible(false);
-    setCurrentEntry(null);
-    setCurrentEntryItems([]);
-    if (entryId) {
+    
+    // Luego limpiar el estado con un pequeño retraso
+    setTimeout(() => {
+      setCurrentEntry(null);
+      setCurrentEntryItems([]);
+      // Reiniciar el modo del modal para próxima apertura
+      setModalMode('create');
+      
+      // Si tenemos un ID (asiento creado o modificado), actualizar la lista
+      if (entryId) {
         fetchEntries();
-    }
+      }
+    }, 300);
   };
 
   // Ordenar por campo
@@ -983,16 +1022,31 @@ export default function Journal() {
           title={modalMode.includes('create') ? (modalMode === 'create-adjustment' ? 'Nuevo Ajuste' : 'Nuevo Asiento') : (modalMode.includes('edit') ? (modalMode === 'edit-adjustment' ? 'Editar Ajuste' : 'Editar Asiento') : 'Ver Asiento')}
           size="xl"
         >
-          <JournalEntryForm
-            mode={modalMode}
-            entryId={currentEntry?.id}
-            entry={currentEntry}
-            entryItems={currentEntryItems}
-            accounts={accounts}
-            onFinish={handleFormFinish}
-            onCancel={handleModalCancel}
-            loading={loading}
-          />
+          <div className="relative">
+            {/* Lógica de carga anticipada para prevenir pantalla en blanco */}
+            {loading && (
+              <div className="absolute inset-0 bg-white bg-opacity-90 z-10 flex items-center justify-center">
+                <div className="text-center">
+                  <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-3"></div>
+                  <p className="text-gray-700">Cargando datos del asiento...</p>
+                </div>
+              </div>
+            )}
+            
+            {/* Envuelve el formulario en un try-catch del lado del cliente */}
+            <div key={`journal-form-${currentEntry?.id || 'new'}-${modalMode}`}>
+              <JournalEntryForm
+                mode={modalMode}
+                entryId={currentEntry?.id}
+                entry={currentEntry}
+                entryItems={currentEntryItems}
+                accounts={accounts}
+                onFinish={handleFormFinish}
+                onCancel={handleModalCancel}
+                loading={loading}
+              />
+            </div>
+          </div>
         </Modal>
       )}
       

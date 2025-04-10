@@ -25,16 +25,12 @@ function SessionMonitor() {
     const cleanup = startSessionMonitoring(
       // Callback cuando el usuario está inactivo
       () => {
-        toast.warn('Su sesión está inactiva. Por favor, mueva el ratón o presione una tecla para continuar.', {
-          autoClose: false,
-          closeOnClick: true
-        });
+        // Toast eliminado
       },
       // Callback cuando la sesión ha expirado
       () => {
-        toast.error('Su sesión ha expirado por inactividad. Por favor, inicie sesión nuevamente.', {
-          onClose: () => navigate('/login')
-        });
+        // Toast de expiración eliminado
+        navigate('/login');
       }
     );
     
@@ -75,14 +71,11 @@ function App() {
         startSessionMonitoring(
           // Callback cuando el usuario está inactivo
           () => {
-            toast.warn('Su sesión está inactiva. Por favor, mueva el ratón o presione una tecla para continuar.', {
-              autoClose: false,
-              closeOnClick: true
-            });
+            // Toast eliminado
           },
           // Callback cuando la sesión ha expirado
           () => {
-            toast.error('Su sesión ha expirado por inactividad. Por favor, inicie sesión nuevamente.');
+            // Toast de expiración eliminado
             supabase.auth.signOut();
           }
         );

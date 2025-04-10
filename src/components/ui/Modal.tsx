@@ -24,12 +24,19 @@ export default function Modal({ title, children, onClose, size = 'md', isOpen = 
     
     window.addEventListener('keydown', handleEsc);
     
+    // Guardar el estado actual del scroll
+    const originalOverflow = window.getComputedStyle(document.body).overflow;
+    
     // Prevenir scroll en el body
     document.body.style.overflow = 'hidden';
     
     return () => {
       window.removeEventListener('keydown', handleEsc);
-      document.body.style.overflow = 'auto';
+      
+      // Restaurar el scroll con un pequeño retraso para asegurar que el DOM se actualice
+      setTimeout(() => {
+        document.body.style.overflow = originalOverflow;
+      }, 50);
     };
   }, [onClose]);
 

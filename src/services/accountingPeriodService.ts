@@ -1258,7 +1258,33 @@ export async function closeFiscalYear(
       };
     }
 
-    // 3. Cerrar todos los períodos mensuales que no estén cerrados
+    // 3. Primero registrar el año fiscal en el historial (antes de cerrar los meses)
+    // Esto evita la posibilidad de problemas con las referencias
+    console.log('Registrando cierre de año fiscal en historial...');
+    
+    try {
+      // Intentar insertar solo el registro del año fiscal primero
+      const { error: fiscalYearHistoryError } = await supabase.from('closing_history').insert([{
+        period_id: fiscalYearId,
+        period_type: 'fiscal_year',
+        period_name: fiscalYear.name || 'Año fiscal',
+        closed_at: new Date().toISOString(),
+        closed_by: userId,
+        notes: 'Cierre de año fiscal',
+        action_type: 'close',
+        created_by: userId
+      }]);
+      
+      if (fiscalYearHistoryError) {
+        console.error('Error al registrar año fiscal en historial:', fiscalYearHistoryError);
+        throw new Error(`Error al registrar año fiscal en historial: ${fiscalYearHistoryError.message}`);
+      }
+    } catch (historyError) {
+      console.error('Excepción al registrar año fiscal en historial:', historyError);
+      throw historyError;
+    }
+
+    // 4. Cerrar los períodos mensuales uno por uno
     const { data: openMonths, error: openMonthsError } = await supabase
       .from('monthly_accounting_periods_with_users')
       .select('id, name')
@@ -1267,27 +1293,62 @@ export async function closeFiscalYear(
 
     if (openMonthsError) throw openMonthsError;
 
+    console.log(`Cerrando ${openMonths?.length || 0} períodos mensuales...`);
+    
     if (openMonths && openMonths.length > 0) {
-      // Cerrar los períodos mensuales abiertos
-      const { error: closeMonthsError } = await supabase
-        .from('monthly_accounting_periods')
-        .update({
-          is_closed: true,
-          is_active: false,
-          closed_at: new Date().toISOString(),
-          closed_by: userId,
-          updated_at: new Date().toISOString()
-        })
-        .in('id', openMonths.map(m => m.id));
+      for (const month of openMonths) {
+        // 4.1 Primero registrar el cierre en el historial
+        try {
+          console.log(`Registrando cierre del período ${month.name} (${month.id}) en historial...`);
+          
+          const { error: monthHistoryError } = await supabase.from('closing_history').insert([{
+            period_id: month.id,
+            period_type: 'monthly',
+            period_name: month.name || `Período ${month.id}`,
+            closed_at: new Date().toISOString(),
+            closed_by: userId,
+            notes: `Cerrado durante cierre de año fiscal`,
+            action_type: 'close',
+            created_by: userId
+          }]);
+          
+          if (monthHistoryError) {
+            console.error(`Error al registrar período ${month.id} en historial:`, monthHistoryError);
+            // Continue con el siguiente mes en lugar de interrumpir todo el proceso
+            continue;
+          }
+        } catch (monthHistoryError) {
+          console.error(`Excepción al registrar período ${month.id} en historial:`, monthHistoryError);
+          // Continue con el siguiente mes
+          continue;
+        }
         
-      if (closeMonthsError) {
-        throw new Error(`Error al cerrar períodos mensuales: ${closeMonthsError.message}`);
+        // 4.2 Luego cerrar el período mensual
+        try {
+          const { error: updateError } = await supabase
+            .from('monthly_accounting_periods')
+            .update({
+              is_closed: true,
+              is_active: false,
+              closed_at: new Date().toISOString(),
+              closed_by: userId,
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', month.id);
+            
+          if (updateError) {
+            console.error(`Error al cerrar período mensual ${month.id}:`, updateError);
+          } else {
+            console.log(`Período mensual ${month.name} cerrado correctamente`);
+          }
+        } catch (updateError) {
+          console.error(`Excepción al cerrar período mensual ${month.id}:`, updateError);
+        }
       }
-      
-      console.log(`Cerrados ${openMonths.length} períodos mensuales del año fiscal`);
     }
-
-    // 4. Cerrar el año fiscal
+    
+    // 5. Finalmente, cerrar el año fiscal
+    console.log('Cerrando año fiscal...');
     const { error } = await supabase
       .from('accounting_periods')
       .update({
@@ -1299,10 +1360,12 @@ export async function closeFiscalYear(
       })
       .eq('id', fiscalYearId);
 
-    if (error) throw error;
+    if (error) {
+      console.error('Error al cerrar año fiscal:', error);
+      throw error;
+    }
     
     console.log(`Año fiscal ${fiscalYear.name} cerrado correctamente`);
-
     return { success: true, error: null };
   } catch (error: any) {
     console.error('Error al cerrar año fiscal:', error);
@@ -1407,8 +1470,6 @@ export async function reopenFiscalYear(
         
       if (reopenMonthsError) throw reopenMonthsError;
     }
-    
-    // Ya no registramos nada en closing_history
 
     return { success: true, error: null };
   } catch (error: any) {

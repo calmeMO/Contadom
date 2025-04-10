@@ -164,9 +164,9 @@ export function UserSettings() {
       thirtyMinutesAgo.setMinutes(thirtyMinutesAgo.getMinutes() - 30);
       
       const { data, error } = await supabase
-        .from('sessions')
-        .select('user_id, updated_at')
-        .gt('updated_at', thirtyMinutesAgo.toISOString());
+        .from('user_sessions')
+        .select('user_id, created_at')
+        .gt('created_at', thirtyMinutesAgo.toISOString());
         
       if (error) {
         console.error('Error al consultar sesiones:', error);
@@ -178,13 +178,13 @@ export function UserSettings() {
       fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
       
       const onlineUserIds = data
-        .filter(session => new Date(session.updated_at) > fiveMinutesAgo)
+        .filter(session => new Date(session.created_at) > fiveMinutesAgo)
         .map(session => session.user_id);
         
       // Usuarios inactivos (entre 5 y 30 minutos sin actividad)
       const inactiveUserIds = data
         .filter(session => {
-          const sessionDate = new Date(session.updated_at);
+          const sessionDate = new Date(session.created_at);
           return sessionDate <= fiveMinutesAgo && sessionDate > thirtyMinutesAgo;
         })
         .map(session => session.user_id);

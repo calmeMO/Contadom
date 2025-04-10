@@ -277,65 +277,13 @@ export function FiscalYearSettings() {
       }
       
       // Cerrar año fiscal
-      try {
-        const { success, error } = await closeFiscalYear(year.id, user.id);
-        
-        if (!success) {
-          throw new Error(error || 'Error al cerrar el año fiscal');
-        }
-        
-        toast.success(`Año fiscal ${year.name} cerrado correctamente junto con sus períodos mensuales`);
-      } catch (specificError: any) {
-        // Verificar si es el error específico de la tabla closing_history
-        if (specificError.message && specificError.message.includes('closing_history does not exist')) {
-          console.warn('La tabla closing_history no existe, continuando de todos modos...');
-          
-          // Actualizamos manualmente el estado del año fiscal como cerrado
-          const { error: manualCloseError } = await supabase
-            .from('accounting_periods')
-            .update({
-              is_closed: true,
-              is_active: false,
-              closed_at: new Date().toISOString(),
-              closed_by: user.id,
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', year.id);
-            
-          if (manualCloseError) {
-            throw new Error(`Error al cerrar manualmente el año fiscal: ${manualCloseError.message}`);
-          }
-          
-          // Cerrar períodos mensuales manualmente
-          const { data: openMonths, error: openMonthsError } = await supabase
-            .from('monthly_accounting_periods')
-            .select('id')
-            .eq('fiscal_year_id', year.id)
-            .eq('is_closed', false);
-            
-          if (!openMonthsError && openMonths && openMonths.length > 0) {
-            const { error: closeMonthsError } = await supabase
-              .from('monthly_accounting_periods')
-              .update({
-                is_closed: true,
-                is_active: false,
-                closed_at: new Date().toISOString(),
-                closed_by: user.id,
-                updated_at: new Date().toISOString()
-              })
-              .in('id', openMonths.map(m => m.id));
-              
-            if (closeMonthsError) {
-              throw new Error(`Error al cerrar manualmente períodos mensuales: ${closeMonthsError.message}`);
-            }
-          }
-          
-          toast.success(`Año fiscal ${year.name} cerrado correctamente junto con sus períodos mensuales`);
-        } else {
-          // Si es otro tipo de error, lo propagamos
-          throw specificError;
-        }
+      const { success, error } = await closeFiscalYear(year.id, user.id);
+      
+      if (!success) {
+        throw new Error(error || 'Error al cerrar el año fiscal');
       }
+      
+      toast.success(`Año fiscal ${year.name} cerrado correctamente junto con sus períodos mensuales`);
       
       // Refrescar datos
       fetchData();
